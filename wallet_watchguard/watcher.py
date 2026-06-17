@@ -143,7 +143,7 @@ class Watcher:
     def _print_startup_summary(self) -> None:
         electrum = self.config["electrum"]
         ntfy = self.config["ntfy"]
-        mempool = self.config.get("mempool") or {}
+        mempool_config = self.config.get("mempool") or {}
 
         print("", flush=True)
         version = get_app_version()
@@ -167,11 +167,19 @@ class Watcher:
             f"tls_verify={bool(ntfy.get('tls_verify', True))}",
             flush=True,
         )
-        print(
-            f"Mempool API: {'enabled' if mempool.get('enabled') else 'disabled'}"
-            + (f" ({mempool.get('base_url')})" if mempool.get("enabled") else ""),
-            flush=True,
-        )
+        mempool_enabled = bool(getattr(self.mempool, "enabled", False))
+        mempool_base_url = str(getattr(self.mempool, "base_url", "") or mempool_config.get("base_url", ""))
+        mempool_tls_verify = bool(getattr(self.mempool, "tls_verify", mempool_config.get("tls_verify", True)))
+        mempool_enrich = bool(mempool_config.get("enrich_notifications", True))
+        if mempool_enabled:
+            print(
+                "Mempool API: enabled"
+                + (f" ({mempool_base_url})" if mempool_base_url else "")
+                + f" tls_verify={mempool_tls_verify} enrich_notifications={mempool_enrich}",
+                flush=True,
+            )
+        else:
+            print("Mempool API: disabled", flush=True)
         conversation = self.config.get("conversation") or {}
         requested = bool(conversation.get("enabled", False))
         conversation_topic = self.decrypted_conversation_ntfy_config.get("topic", ntfy["topic"])
@@ -201,7 +209,7 @@ class Watcher:
         print(f"  wwg addresses --config {self.config_path} --limit 20", flush=True)
         print(f'  wwg addresses --config {self.config_path} --wallet "<wallet name>" --limit 20', flush=True)
         print(f"  wwg addresses --config {self.config_path} --all --include-change --limit 20", flush=True)
-        if bool(mempool.get("enabled", False)):
+        if mempool_enabled:
             print(f"  wwg fees --config {self.config_path}", flush=True)
         if bool((self.config.get("conversation") or {}).get("enabled", False)):
             print("  ntfy conversation: send 'wwg help' to the protected topic", flush=True)

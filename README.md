@@ -288,6 +288,12 @@ mempool:
   enrich_notifications: true
 ```
 
+Test it with:
+
+```bash
+wwg fees
+```
+
 ## Docker Compose Logs
 
 When running successfully, the daemon prints a non-secret startup summary to the logs:
