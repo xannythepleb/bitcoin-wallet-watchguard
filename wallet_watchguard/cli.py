@@ -676,10 +676,38 @@ def _select_wallets_for_addresses(config: dict, args: argparse.Namespace) -> lis
 
 
 async def _cmd_addresses_async(config: dict, passphrase: str, args: argparse.Namespace) -> None:
+    electrum = config["electrum"]
     client = _make_electrum_client(config)
+
+    def debug(message: str) -> None:
+        if args.debug:
+            print(f"debug: {message}", file=sys.stderr)
+
+    async def ignore_notifications(message: dict) -> None:
+        debug(f"Electrum notification ignored by addresses command: {message}")
+
+    debug(
+        "connecting to Electrum/Fulcrum "
+        f"{electrum['host']}:{electrum['port']} "
+        f"tls={bool(electrum.get('tls', True))} "
+        f"tls_verify={client.tls_verify} "
+        f"socks_proxy={electrum.get('socks_proxy') or 'none'}"
+    )
+
     await client.connect()
+
+    # ElectrumClient.call() is completed by ElectrumClient.listen(), which reads
+    # JSON-RPC responses from the socket. The long-running watcher already starts
+    # listen(), but this one-shot CLI command did not. Without this background
+    # reader, balance/history calls can time out after printing only the table
+    # header.
+    listener_task = asyncio.create_task(client.listen(ignore_notifications))
+
     try:
         wallets = _select_wallets_for_addresses(config, args)
+        debug(f"selected {len(wallets)} wallet(s): {', '.join(w['name'] for w in wallets)}")
+        debug(f"derivation helper path: {config['app'].get('derivation_helper_path', './wwg-derive')}")
+        debug(f"address limit per branch: {args.limit}")
 
         for wallet in wallets:
             print()
@@ -692,17 +720,50 @@ async def _cmd_addresses_async(config: dict, passphrase: str, args: argparse.Nam
             wallet_confirmed = 0
             wallet_unconfirmed = 0
             printed_rows = 0
+            derived_rows = 0
+            queried_rows = 0
 
             for branch in branches:
                 label = "receive" if branch == 0 else "change"
+                path_template = wallet.get("receive_path_template", "0/*") if branch == 0 else wallet.get("change_path_template", "1/*")
+                debug(
+                    f"deriving wallet={wallet['name']!r} branch={label} "
+                    f"template={path_template!r} wallet_type={wallet['wallet_type']} "
+                    f"network={wallet['network']} account_path={wallet['account_path']!r}"
+                )
+
                 derived = _derive_for_cli(config, wallet, passphrase, branch=branch, limit=args.limit)
+                derived_rows += len(derived)
+                debug(f"derived {len(derived)} {label} address(es)")
+
+                if args.debug and derived:
+                    first = derived[0]
+                    debug(
+                        f"first {label} address: path={first.path} "
+                        f"address={first.address} scripthash={first.scripthash}"
+                    )
+
                 for item in derived:
-                    balance = await client.call("blockchain.scripthash.get_balance", [item.scripthash])
-                    history = await client.call("blockchain.scripthash.get_history", [item.scripthash])
+                    debug(f"querying balance/history for {item.path} {item.address}")
+                    try:
+                        balance = await client.call("blockchain.scripthash.get_balance", [item.scripthash])
+                        history = await client.call("blockchain.scripthash.get_history", [item.scripthash])
+                    except Exception as exc:
+                        print(
+                            f"error: failed to query Electrum/Fulcrum for {item.path} {item.address}: {exc}",
+                            file=sys.stderr,
+                        )
+                        raise
+
+                    queried_rows += 1
                     confirmed = int(balance.get("confirmed") or 0)
                     unconfirmed = int(balance.get("unconfirmed") or 0)
                     used = bool(history)
                     status = "used" if used else "unused"
+                    debug(
+                        f"result {item.path}: confirmed={confirmed} "
+                        f"unconfirmed={unconfirmed} history_entries={len(history)}"
+                    )
 
                     wallet_confirmed += confirmed
                     wallet_unconfirmed += unconfirmed
@@ -720,12 +781,21 @@ async def _cmd_addresses_async(config: dict, passphrase: str, args: argparse.Nam
 
             if printed_rows == 0:
                 print("No addresses matched the selected filters.")
+                print(f"Derived addresses: {derived_rows}; queried addresses: {queried_rows}.")
                 if args.only_nonzero or args.only_used:
                     print("Try running without --only-nonzero/--only-used to show unused receive addresses.")
+                if derived_rows == 0:
+                    print("No addresses were derived. Check the derivation helper path, wallet type and path templates.")
+                print("For verbose troubleshooting, rerun with --debug.")
 
             print("-" * 104)
             print(f"{'total':<36} {wallet_confirmed:>14,} {wallet_unconfirmed:>14,}")
     finally:
+        listener_task.cancel()
+        try:
+            await listener_task
+        except asyncio.CancelledError:
+            pass
         await client.close()
 
 
@@ -897,6 +967,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_addr.add_argument("--include-change", action="store_true", help="Also list the change branch")
     p_addr.add_argument("--only-nonzero", action="store_true", help="Hide addresses with zero confirmed and unconfirmed balance")
     p_addr.add_argument("--only-used", action="store_true", help="Hide addresses with no Electrum history")
+    p_addr.add_argument("--debug", action="store_true", help="Print derivation and Electrum query diagnostics to stderr")
     p_addr.set_defaults(func=cmd_addresses)
 
     return parser
