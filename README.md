@@ -39,6 +39,16 @@ wwg init --config /data/config.yaml --add app
 wwg init --config /data/config.yaml --reset
 ```
 
+### Docker Images
+
+Wallet Watchguard publishes Docker images to GitHub automatically. Images are built and pushed when a new version is released.
+
+For example:
+
+```bash
+docker pull ghcr.io/xannythepleb/wallet-watchguard:latest
+```
+
 ## Ntfy Test Command
 
 After configuring ntfy, send a test notification:
