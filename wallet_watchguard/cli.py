@@ -12,16 +12,21 @@ import yaml
 
 from .config import default_config, load_config, load_config_for_edit, save_config
 from .crypto import (
+    decrypt_xpub_with_passphrase,
     encrypt_string_with_passphrase,
     encrypt_xpub_with_passphrase,
+    metadata_from_config,
     metadata_to_config,
     prompt_existing_passphrase,
     prompt_new_passphrase,
 )
+from .derivation import derive_addresses
+from .electrum import ElectrumClient
+from .ntfy import NtfyNotifier, decrypt_ntfy_config
 from .watcher import Watcher, get_passphrase_from_env_or_prompt
 
 
-INIT_SECTIONS = ["full", "electrum", "ntfy", "wallet", "app"]
+INIT_SECTIONS = ["full", "electrum", "ntfy", "wallet", "app", "mempool"]
 
 
 def _prompt(label: str, default: str | None = None) -> str:
@@ -156,6 +161,7 @@ def _prompt_electrum_config(existing_electrum: dict | None = None) -> dict[str, 
     print("Electrum/Fulcrum configuration")
     print("Privacy recommendation: use your own Bitcoin node + Fulcrum.")
     print("Using a public Electrum server with xpub-derived addresses can leak wallet activity.")
+    print("For Start9/StartOS or LAN services with self-signed TLS certificates, disable TLS verification below.")
     print()
 
     current_tls = bool(existing_electrum.get("tls", True))
@@ -164,6 +170,12 @@ def _prompt_electrum_config(existing_electrum: dict | None = None) -> dict[str, 
     default_port = "50002" if use_tls else "50001"
     current_port = existing_electrum.get("port") or default_port
     electrum_port = int(_prompt("Electrum/Fulcrum port", str(current_port)))
+    tls_verify = True
+    if use_tls:
+        tls_verify = _prompt_bool(
+            "Verify Electrum/Fulcrum TLS certificate",
+            bool(existing_electrum.get("tls_verify", True)),
+        )
     socks_proxy = _prompt(
         "SOCKS5 proxy for onion host, blank for none",
         str(existing_electrum.get("socks_proxy") or ""),
@@ -173,6 +185,7 @@ def _prompt_electrum_config(existing_electrum: dict | None = None) -> dict[str, 
         "host": electrum_host,
         "port": electrum_port,
         "tls": use_tls,
+        "tls_verify": tls_verify,
         "socks_proxy": socks_proxy or None,
         "timeout_seconds": int(_prompt("Connection timeout seconds", str(existing_electrum.get("timeout_seconds", 30)))),
     }
@@ -227,6 +240,11 @@ def _prompt_ntfy_start9_config(passphrase: str, existing_ntfy: dict | None = Non
         "auth": auth,
         "priority": str(existing_ntfy.get("priority", "high")),
         "tags": str(existing_ntfy.get("tags", "bitcoin,watch")),
+        "tls_verify": _prompt_bool(
+            "Verify ntfy TLS certificate",
+            bool(existing_ntfy.get("tls_verify", False)),
+        ),
+        "timeout_seconds": int(_prompt("ntfy timeout seconds", str(existing_ntfy.get("timeout_seconds", 15)))),
     }
 
 
@@ -268,6 +286,8 @@ def _prompt_ntfy_config(passphrase: str, existing_ntfy: dict | None = None) -> d
             },
             "priority": str(existing_ntfy.get("priority", "high")),
             "tags": str(existing_ntfy.get("tags", "bitcoin,watch")),
+            "tls_verify": _prompt_bool("Verify ntfy TLS certificate", bool(existing_ntfy.get("tls_verify", True))),
+            "timeout_seconds": int(_prompt("ntfy timeout seconds", str(existing_ntfy.get("timeout_seconds", 15)))),
         }
 
     if plaintext_username and plaintext_password and _prompt_bool(
@@ -288,6 +308,8 @@ def _prompt_ntfy_config(passphrase: str, existing_ntfy: dict | None = None) -> d
             },
             "priority": str(existing_ntfy.get("priority", "high")),
             "tags": str(existing_ntfy.get("tags", "bitcoin,watch")),
+            "tls_verify": _prompt_bool("Verify ntfy TLS certificate", bool(existing_ntfy.get("tls_verify", True))),
+            "timeout_seconds": int(_prompt("ntfy timeout seconds", str(existing_ntfy.get("timeout_seconds", 15)))),
         }
 
     print()
@@ -351,6 +373,30 @@ def _prompt_ntfy_config(passphrase: str, existing_ntfy: dict | None = None) -> d
         "auth": new_auth,
         "priority": _prompt("ntfy priority", str(existing_ntfy.get("priority", "high"))),
         "tags": _prompt("ntfy tags", str(existing_ntfy.get("tags", "bitcoin,watch"))),
+        "tls_verify": _prompt_bool("Verify ntfy TLS certificate", bool(existing_ntfy.get("tls_verify", True))),
+        "timeout_seconds": int(_prompt("ntfy timeout seconds", str(existing_ntfy.get("timeout_seconds", 15)))),
+    }
+
+
+def _prompt_mempool_config(existing_mempool: dict | None = None) -> dict[str, object]:
+    existing_mempool = existing_mempool or {}
+
+    print()
+    print("Optional Mempool API configuration")
+    print("This is only used to enrich notifications with decoded transaction data such as amount, fee and fee rate.")
+    print("Fulcrum/Electrum remains the source of truth for wallet activity detection.")
+    print("For Start9/StartOS or LAN services with self-signed TLS certificates, disable TLS verification below.")
+
+    enabled = _prompt_bool("Enable Mempool API enrichment", bool(existing_mempool.get("enabled", False)))
+    base_url_default = str(existing_mempool.get("base_url") or "https://mempool.example.com/api")
+    base_url = _prompt("Mempool API base URL", base_url_default) if enabled else str(existing_mempool.get("base_url") or "")
+
+    return {
+        "enabled": enabled,
+        "base_url": base_url.rstrip("/"),
+        "tls_verify": _prompt_bool("Verify Mempool TLS certificate", bool(existing_mempool.get("tls_verify", True))) if enabled else bool(existing_mempool.get("tls_verify", True)),
+        "timeout_seconds": int(_prompt("Mempool timeout seconds", str(existing_mempool.get("timeout_seconds", 15)))) if enabled else int(existing_mempool.get("timeout_seconds", 15)),
+        "enrich_notifications": True,
     }
 
 
@@ -396,6 +442,7 @@ def _apply_full_setup(config: dict, args: argparse.Namespace, *, existing_secret
     config["app"] = _prompt_app_config(config.get("app"))
     config["electrum"] = _prompt_electrum_config(config.get("electrum"))
     config["ntfy"] = _prompt_ntfy_config(passphrase, config.get("ntfy"))
+    config["mempool"] = _prompt_mempool_config(config.get("mempool"))
     config["wallets"] = [_prompt_wallet_config(passphrase)]
     return config
 
@@ -410,6 +457,10 @@ def _apply_section(config: dict, section: str, args: argparse.Namespace) -> dict
 
     if section == "electrum":
         config["electrum"] = _prompt_electrum_config(config.get("electrum"))
+        return config
+
+    if section == "mempool":
+        config["mempool"] = _prompt_mempool_config(config.get("mempool"))
         return config
 
     if section == "ntfy":
@@ -450,8 +501,9 @@ def _choose_section_to_add() -> str:
             "2": "Electrum/Fulcrum node",
             "3": "Add wallet xpub",
             "4": "Application settings",
-            "5": "Full setup wizard",
-            "6": "Cancel",
+            "5": "Optional Mempool API enrichment",
+            "6": "Full setup wizard",
+            "7": "Cancel",
         },
         default="1",
     )
@@ -463,8 +515,9 @@ def _section_from_menu_choice(choice: str) -> str | None:
         "2": "electrum",
         "3": "wallet",
         "4": "app",
-        "5": "full",
-        "6": None,
+        "5": "mempool",
+        "6": "full",
+        "7": None,
     }[choice]
 
 
@@ -487,6 +540,99 @@ def _print_save_summary(config_path: Path, config: dict) -> None:
     print()
     print("Run via Docker Compose with:")
     print("  WWG_PASSPHRASE='your passphrase here' docker compose up -d")
+    print()
+    print("Useful checks:")
+    print(f"  wwg test-ntfy --config {config_path}")
+    print(f"  wwg addresses --config {config_path} --limit 20")
+
+
+def _make_electrum_client(config: dict) -> ElectrumClient:
+    electrum = config["electrum"]
+    return ElectrumClient(
+        electrum["host"],
+        int(electrum["port"]),
+        use_tls=bool(electrum.get("tls", True)),
+        tls_verify=electrum.get("tls_verify"),
+        socks_proxy=electrum.get("socks_proxy"),
+        timeout_seconds=int(electrum.get("timeout_seconds", 30)),
+    )
+
+
+def _wallet_xpub(wallet: dict, passphrase: str) -> str:
+    return decrypt_xpub_with_passphrase(
+        encrypted_xpub_b64=wallet["encrypted_xpub"],
+        passphrase=passphrase,
+        metadata=metadata_from_config(wallet["xpub_encryption"]),
+    )
+
+
+def _derive_for_cli(config: dict, wallet: dict, passphrase: str, *, branch: int, limit: int):
+    xpub = _wallet_xpub(wallet, passphrase)
+    helper_path = config["app"].get("derivation_helper_path", "./wwg-derive")
+    path_template = wallet.get("receive_path_template", "0/*") if branch == 0 else wallet.get("change_path_template", "1/*")
+
+    return derive_addresses(
+        helper_path=helper_path,
+        wallet_name=wallet["name"],
+        xpub=xpub,
+        network=wallet["network"],
+        wallet_type=wallet["wallet_type"],
+        account_path=wallet["account_path"],
+        path_template=path_template,
+        branch=branch,
+        start=0,
+        end=limit - 1,
+    )
+
+
+async def _cmd_test_ntfy_async(config: dict, passphrase: str) -> None:
+    notifier = NtfyNotifier(decrypt_ntfy_config(config["ntfy"], passphrase))
+    await notifier.send(
+        "Wallet Watchguard test",
+        "Wallet Watchguard successfully published this test notification via ntfy.",
+        priority="default",
+        tags="white_check_mark,bitcoin",
+    )
+
+
+async def _cmd_addresses_async(config: dict, passphrase: str, args: argparse.Namespace) -> None:
+    client = _make_electrum_client(config)
+    await client.connect()
+    try:
+        wallets = config.get("wallets") or []
+        if args.wallet:
+            wallets = [w for w in wallets if w["name"] == args.wallet]
+            if not wallets:
+                raise ValueError(f"No wallet named {args.wallet!r} exists in config")
+
+        for wallet in wallets:
+            print()
+            print(f"Wallet: {wallet['name']} ({wallet['network']} / {wallet['wallet_type']})")
+            print("-" * 88)
+            print(f"{'branch':<8} {'path':<18} {'confirmed':>14} {'unconfirmed':>14}  address")
+            print("-" * 88)
+
+            branches = [0, 1] if args.include_change else [0]
+            wallet_confirmed = 0
+            wallet_unconfirmed = 0
+
+            for branch in branches:
+                label = "receive" if branch == 0 else "change"
+                derived = _derive_for_cli(config, wallet, passphrase, branch=branch, limit=args.limit)
+                for item in derived:
+                    balance = await client.call("blockchain.scripthash.get_balance", [item.scripthash])
+                    confirmed = int(balance.get("confirmed") or 0)
+                    unconfirmed = int(balance.get("unconfirmed") or 0)
+                    wallet_confirmed += confirmed
+                    wallet_unconfirmed += unconfirmed
+                    if args.only_nonzero and confirmed == 0 and unconfirmed == 0:
+                        continue
+                    print(f"{label:<8} {item.path:<18} {confirmed:>14,} {unconfirmed:>14,}  {item.address}")
+
+            print("-" * 88)
+            print(f"{'total':<27} {wallet_confirmed:>14,} {wallet_unconfirmed:>14,}")
+    finally:
+        await client.close()
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -592,8 +738,23 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     config = load_config(config_path)
     passphrase = args.passphrase or get_passphrase_from_env_or_prompt()
-    watcher = Watcher(config, passphrase)
+    watcher = Watcher(config, passphrase, config_path=config_path)
     asyncio.run(watcher.run())
+    return 0
+
+
+def cmd_test_ntfy(args: argparse.Namespace) -> int:
+    config = load_config_for_edit(args.config)
+    passphrase = args.passphrase or get_passphrase_from_env_or_prompt()
+    asyncio.run(_cmd_test_ntfy_async(config, passphrase))
+    print("ntfy test message sent successfully.")
+    return 0
+
+
+def cmd_addresses(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    passphrase = args.passphrase or get_passphrase_from_env_or_prompt()
+    asyncio.run(_cmd_addresses_async(config, passphrase, args))
     return 0
 
 
@@ -608,7 +769,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--add",
         choices=INIT_SECTIONS,
         default=None,
-        help="Jump directly to a setup section: full, electrum, ntfy, wallet, or app",
+        help="Jump directly to a setup section: full, electrum, ntfy, wallet, app, or mempool",
     )
     p_init.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt")
     p_init.set_defaults(func=cmd_init)
@@ -622,6 +783,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--config", default="config.yaml")
     p_run.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt/env")
     p_run.set_defaults(func=cmd_run)
+
+    p_test = sub.add_parser("test-ntfy", help="Send a test ntfy notification using the configured credentials")
+    p_test.add_argument("--config", default="config.yaml")
+    p_test.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt/env")
+    p_test.set_defaults(func=cmd_test_ntfy)
+
+    p_addr = sub.add_parser(
+        "addresses",
+        aliases=["list-addresses"],
+        help="List derived wallet addresses and Electrum/Fulcrum balances",
+    )
+    p_addr.add_argument("--config", default="config.yaml")
+    p_addr.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt/env")
+    p_addr.add_argument("--wallet", default=None, help="Only show one wallet by name")
+    p_addr.add_argument("--limit", type=int, default=20, help="Number of receive/change addresses to derive per wallet")
+    p_addr.add_argument("--include-change", action="store_true", help="Also list the change branch")
+    p_addr.add_argument("--only-nonzero", action="store_true", help="Hide addresses with zero confirmed and unconfirmed balance")
+    p_addr.set_defaults(func=cmd_addresses)
 
     return parser
 

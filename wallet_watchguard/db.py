@@ -24,6 +24,10 @@ CREATE TABLE IF NOT EXISTS watched_scripts (
     last_status TEXT
 );
 
+CREATE INDEX IF NOT EXISTS idx_watched_scripts_wallet ON watched_scripts(wallet_name);
+CREATE INDEX IF NOT EXISTS idx_watched_scripts_script_pubkey ON watched_scripts(script_pubkey);
+CREATE INDEX IF NOT EXISTS idx_watched_scripts_branch_index ON watched_scripts(wallet_name, branch, address_index);
+
 CREATE TABLE IF NOT EXISTS tx_history (
     scripthash TEXT NOT NULL,
     txid TEXT NOT NULL,
@@ -132,6 +136,13 @@ class Database:
         cur = await self._conn().execute("SELECT * FROM watched_scripts WHERE scripthash = ?", (scripthash,))
         return await cur.fetchone()
 
+    async def get_watched_scripts_for_wallet(self, wallet_name: str) -> list[aiosqlite.Row]:
+        cur = await self._conn().execute(
+            "SELECT * FROM watched_scripts WHERE wallet_name = ? ORDER BY branch, address_index",
+            (wallet_name,),
+        )
+        return list(await cur.fetchall())
+
     async def remember_history(self, scripthash: str, history: list[dict]) -> list[dict]:
         """Store history rows and return only newly seen tx entries."""
         conn = self._conn()
@@ -141,11 +152,18 @@ class Database:
             txid = item["tx_hash"]
             height = int(item.get("height", 0))
             cur = await conn.execute(
-                "SELECT 1 FROM tx_history WHERE scripthash = ? AND txid = ?",
+                "SELECT height FROM tx_history WHERE scripthash = ? AND txid = ?",
                 (scripthash, txid),
             )
-            exists = await cur.fetchone()
-            if exists:
+            existing = await cur.fetchone()
+            if existing:
+                previous_height = int(existing["height"])
+                if previous_height != height:
+                    await conn.execute(
+                        "UPDATE tx_history SET height = ? WHERE scripthash = ? AND txid = ?",
+                        (height, scripthash, txid),
+                    )
+                    new_items.append(item)
                 continue
             await conn.execute(
                 "INSERT INTO tx_history (scripthash, txid, height) VALUES (?, ?, ?)",

@@ -31,3 +31,5 @@ class WalletEvent:
     address: str | None = None
     path: str | None = None
     fee_sats: int | None = None
+    vsize: int | None = None
+    fee_rate_sat_vb: float | None = None

@@ -2,78 +2,37 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 from typing import Any
 
-from .crypto import (
-    decrypt_string_with_passphrase,
-    decrypt_xpub_with_passphrase,
-    metadata_from_config,
-    prompt_existing_passphrase,
-)
+from .crypto import decrypt_xpub_with_passphrase, metadata_from_config, prompt_existing_passphrase
 from .db import Database
 from .derivation import derive_addresses
 from .electrum import ElectrumClient
+from .mempool import MempoolClient, mempool_fee_rate, mempool_tx_status
 from .models import WalletEvent
-from .ntfy import NtfyNotifier
+from .ntfy import NtfyNotifier, decrypt_ntfy_config
 
 
 class Watcher:
-    def __init__(self, config: dict[str, Any], passphrase: str) -> None:
-        if not passphrase:
-            raise ValueError("Wallet Watchguard passphrase must not be blank")
-
+    def __init__(self, config: dict[str, Any], passphrase: str, *, config_path: str | Path | None = None) -> None:
         self.config = config
         self.passphrase = passphrase
+        self.config_path = str(config_path) if config_path is not None else "config.yaml"
         self.db = Database(config["app"]["database_path"])
         electrum = config["electrum"]
         self.client = ElectrumClient(
             electrum["host"],
             int(electrum["port"]),
-            use_tls=bool(electrum.get("tls", False)),
+            use_tls=bool(electrum.get("tls", True)),
+            tls_verify=electrum.get("tls_verify"),
             socks_proxy=electrum.get("socks_proxy"),
             timeout_seconds=int(electrum.get("timeout_seconds", 30)),
         )
-        self.notifier = NtfyNotifier(self._decrypt_ntfy_config(config["ntfy"]))
+        self.notifier = NtfyNotifier(decrypt_ntfy_config(config["ntfy"], passphrase))
+        self.mempool = MempoolClient(config.get("mempool") or {})
         self._subscriptions_ready = asyncio.Event()
-
-    def _decrypt_ntfy_config(self, ntfy_config: dict[str, Any]) -> dict[str, Any]:
-        auth = dict(ntfy_config.get("auth") or {"type": "none"})
-        auth_type = auth.get("type", "none")
-
-        decrypted_auth: dict[str, Any] = {"type": auth_type}
-
-        if auth_type == "token":
-            decrypted_auth["token"] = decrypt_string_with_passphrase(
-                encrypted_value_b64=auth["encrypted_token"],
-                passphrase=self.passphrase,
-                metadata=metadata_from_config(auth["token_encryption"]),
-                secret_name="ntfy token",
-            )
-        elif auth_type == "basic":
-            decrypted_auth["username"] = decrypt_string_with_passphrase(
-                encrypted_value_b64=auth["encrypted_username"],
-                passphrase=self.passphrase,
-                metadata=metadata_from_config(auth["username_encryption"]),
-                secret_name="ntfy username",
-            )
-            decrypted_auth["password"] = decrypt_string_with_passphrase(
-                encrypted_value_b64=auth["encrypted_password"],
-                passphrase=self.passphrase,
-                metadata=metadata_from_config(auth["password_encryption"]),
-                secret_name="ntfy password",
-            )
-        elif auth_type == "none":
-            pass
-        else:
-            raise ValueError(f"Unsupported ntfy auth type: {auth_type}")
-
-        return {
-            "server": ntfy_config["server"],
-            "topic": ntfy_config["topic"],
-            "auth": decrypted_auth,
-            "priority": ntfy_config.get("priority", "default"),
-            "tags": ntfy_config.get("tags", "bitcoin"),
-        }
+        self._subscription_count = 0
 
     async def run(self) -> None:
         await self.db.connect()
@@ -83,6 +42,7 @@ class Watcher:
         try:
             await self._derive_store_and_subscribe()
             self._subscriptions_ready.set()
+            self._print_startup_summary()
             await asyncio.Event().wait()
         finally:
             listener.cancel()
@@ -132,6 +92,52 @@ class Watcher:
 
             for script in scripts:
                 await self.client.call("blockchain.scripthash.subscribe", [script.scripthash])
+                self._subscription_count += 1
+
+    def _print_startup_summary(self) -> None:
+        electrum = self.config["electrum"]
+        ntfy = self.config["ntfy"]
+        mempool = self.config.get("mempool") or {}
+
+        print("", flush=True)
+        print("Bitcoin Wallet Watchguard is running", flush=True)
+        print("-------------------------------------", flush=True)
+        print(f"Config: {self.config_path}", flush=True)
+        print(f"Database: {self.config['app']['database_path']}", flush=True)
+        print(
+            "Electrum/Fulcrum: "
+            f"{electrum['host']}:{electrum['port']} "
+            f"tls={bool(electrum.get('tls', True))} "
+            f"tls_verify={bool(electrum.get('tls_verify', True))}",
+            flush=True,
+        )
+        print(
+            f"ntfy: {ntfy['server'].rstrip('/')}/{ntfy['topic']} "
+            f"auth={(ntfy.get('auth') or {}).get('type', 'none')} "
+            f"tls_verify={bool(ntfy.get('tls_verify', True))}",
+            flush=True,
+        )
+        print(
+            f"Mempool API: {'enabled' if mempool.get('enabled') else 'disabled'}"
+            + (f" ({mempool.get('base_url')})" if mempool.get("enabled") else ""),
+            flush=True,
+        )
+        print(f"Subscribed scripts: {self._subscription_count}", flush=True)
+        print("", flush=True)
+        print("Wallets:", flush=True)
+        for wallet in self.config.get("wallets", []):
+            print(
+                "  - "
+                f"{wallet['name']} | {wallet['network']} | {wallet['wallet_type']} | "
+                f"lookahead={wallet.get('lookahead', self.config['app'].get('lookahead', 100))}",
+                flush=True,
+            )
+        print("", flush=True)
+        print("Useful commands:", flush=True)
+        print(f"  wwg test-ntfy --config {self.config_path}", flush=True)
+        print(f"  wwg addresses --config {self.config_path} --limit 20", flush=True)
+        print(f"  wwg addresses --config {self.config_path} --include-change --limit 20", flush=True)
+        print("", flush=True)
 
     async def _handle_notification(self, message: dict[str, Any]) -> None:
         if message.get("method") != "blockchain.scripthash.subscribe":
@@ -155,30 +161,120 @@ class Watcher:
         for item in new_items:
             txid = item["tx_hash"]
             height = int(item.get("height", 0))
-            event = WalletEvent(
-                wallet_name=watched["wallet_name"],
-                txid=txid,
-                event_type="activity",
-                amount_sats=0,
-                status="unconfirmed" if height <= 0 else "confirmed",
-                height=height,
-                address=watched["address"],
-                path=watched["path"],
-            )
+            event = await self._build_event(watched, txid, height)
 
             if await self.db.save_event(event):
                 await self._notify_activity(event)
 
-    async def _notify_activity(self, event: WalletEvent) -> None:
-        title = f"Bitcoin wallet activity: {event.wallet_name}"
-        status = "unconfirmed/mempool" if event.status == "unconfirmed" else f"confirmed at height {event.height}"
-        message = (
-            f"**Wallet:** {event.wallet_name}\n\n"
-            f"**Status:** {status}\n\n"
-            f"**Address:** `{event.address}`\n\n"
-            f"**Path:** `{event.path}`\n\n"
-            f"**Tx:** `{event.txid}`"
+    async def _build_event(self, watched: Any, txid: str, electrum_height: int) -> WalletEvent:
+        if not self.mempool.enabled:
+            return WalletEvent(
+                wallet_name=watched["wallet_name"],
+                txid=txid,
+                event_type="activity",
+                amount_sats=0,
+                status="unconfirmed" if electrum_height <= 0 else "confirmed",
+                height=electrum_height,
+                address=watched["address"],
+                path=watched["path"],
+            )
+
+        try:
+            tx = await self.mempool.get_tx(txid)
+        except Exception:
+            return WalletEvent(
+                wallet_name=watched["wallet_name"],
+                txid=txid,
+                event_type="activity",
+                amount_sats=0,
+                status="unconfirmed" if electrum_height <= 0 else "confirmed",
+                height=electrum_height,
+                address=watched["address"],
+                path=watched["path"],
+            )
+
+        wallet_scripts = await self.db.get_watched_scripts_for_wallet(watched["wallet_name"])
+        owned_by_script = {row["script_pubkey"]: row for row in wallet_scripts}
+
+        owned_input_sats = 0
+        owned_output_sats = 0
+        touched_address = watched["address"]
+        touched_path = watched["path"]
+
+        for vin in tx.get("vin") or []:
+            prevout = vin.get("prevout") or {}
+            script = prevout.get("scriptpubkey")
+            if script in owned_by_script:
+                owned_input_sats += int(prevout.get("value") or 0)
+                touched_address = owned_by_script[script]["address"]
+                touched_path = owned_by_script[script]["path"]
+
+        for vout in tx.get("vout") or []:
+            script = vout.get("scriptpubkey")
+            if script in owned_by_script:
+                owned_output_sats += int(vout.get("value") or 0)
+                touched_address = owned_by_script[script]["address"]
+                touched_path = owned_by_script[script]["path"]
+
+        net_sats = owned_output_sats - owned_input_sats
+        if net_sats > 0:
+            event_type = "received"
+        elif net_sats < 0:
+            event_type = "sent"
+        elif owned_input_sats or owned_output_sats:
+            event_type = "self_transfer"
+        else:
+            event_type = "activity"
+
+        status, height = mempool_tx_status(tx, electrum_height)
+        return WalletEvent(
+            wallet_name=watched["wallet_name"],
+            txid=txid,
+            event_type=event_type,
+            amount_sats=net_sats,
+            status=status,
+            height=height,
+            address=touched_address,
+            path=touched_path,
+            fee_sats=int(tx["fee"]) if tx.get("fee") is not None else None,
+            vsize=int(tx["vsize"]) if tx.get("vsize") is not None else None,
+            fee_rate_sat_vb=mempool_fee_rate(tx),
         )
+
+    async def _notify_activity(self, event: WalletEvent) -> None:
+        if event.event_type == "received":
+            title = f"Bitcoin received: {event.wallet_name}"
+        elif event.event_type == "sent":
+            title = f"Bitcoin sent: {event.wallet_name}"
+        elif event.event_type == "self_transfer":
+            title = f"Bitcoin self-transfer: {event.wallet_name}"
+        else:
+            title = f"Bitcoin wallet activity: {event.wallet_name}"
+
+        status = "unconfirmed/mempool" if event.status == "unconfirmed" else f"confirmed at height {event.height}"
+        lines = [
+            f"**Wallet:** {event.wallet_name}",
+            f"**Type:** {event.event_type}",
+            f"**Status:** {status}",
+        ]
+
+        if event.amount_sats:
+            sign = "+" if event.amount_sats > 0 else ""
+            lines.append(f"**Amount:** `{sign}{event.amount_sats:,} sats`")
+        if event.fee_sats is not None:
+            lines.append(f"**Fee:** `{event.fee_sats:,} sats`")
+        if event.vsize is not None:
+            lines.append(f"**vsize:** `{event.vsize} vB`")
+        if event.fee_rate_sat_vb is not None:
+            lines.append(f"**Fee rate:** `{event.fee_rate_sat_vb:.2f} sat/vB`")
+
+        if event.address:
+            lines.append(f"**Address:** `{event.address}`")
+        if event.path:
+            lines.append(f"**Path:** `{event.path}`")
+
+        lines.append(f"**Tx:** `{event.txid}`")
+        message = "\n\n".join(lines)
         await self.notifier.send(title, message)
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import ipaddress
 import ssl
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -12,6 +13,20 @@ except Exception:  # pragma: no cover - optional dependency import guard
     Proxy = None  # type: ignore[assignment]
 
 NotificationHandler = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+def default_tls_verify_for_host(host: str) -> bool:
+    """Default to relaxed verification for local/self-host appliance names only."""
+    lowered = host.strip().lower()
+    if lowered in {"localhost", "127.0.0.1", "::1"}:
+        return False
+    if lowered.endswith((".local", ".localdomain", ".lan", ".onion")):
+        return False
+    try:
+        ip = ipaddress.ip_address(lowered)
+        return not (ip.is_private or ip.is_loopback or ip.is_link_local)
+    except ValueError:
+        return True
 
 
 class ElectrumError(RuntimeError):
@@ -30,12 +45,14 @@ class ElectrumClient:
         port: int,
         *,
         use_tls: bool,
+        tls_verify: bool | None = None,
         socks_proxy: str | None = None,
         timeout_seconds: int = 30,
     ) -> None:
         self.host = host
         self.port = port
         self.use_tls = use_tls
+        self.tls_verify = default_tls_verify_for_host(host) if tls_verify is None else tls_verify
         self.socks_proxy = socks_proxy
         self.timeout_seconds = timeout_seconds
         self.reader: asyncio.StreamReader | None = None
@@ -43,8 +60,22 @@ class ElectrumClient:
         self._next_id = 0
         self._pending: dict[int, asyncio.Future[Any]] = {}
 
+    def _ssl_context(self) -> ssl.SSLContext | None:
+        if not self.use_tls:
+            return None
+
+        if self.tls_verify:
+            return ssl.create_default_context()
+
+        # Start9/StartOS and similar local node setups commonly use private/self-signed certs.
+        # This keeps TLS encryption enabled but disables public CA verification.
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+
     async def connect(self) -> None:
-        ssl_context = ssl.create_default_context() if self.use_tls else None
+        ssl_context = self._ssl_context()
 
         if self.host.endswith(".onion") and not self.socks_proxy:
             raise ElectrumError(
@@ -56,11 +87,20 @@ class ElectrumClient:
                 raise ElectrumError("python-socks is required for socks_proxy support")
             proxy = Proxy.from_url(f"socks5://{self.socks_proxy}")
             sock = await proxy.connect(dest_host=self.host, dest_port=self.port, timeout=self.timeout_seconds)
-            self.reader, self.writer = await asyncio.open_connection(sock=sock, ssl=ssl_context, server_hostname=self.host if self.use_tls else None)
+            self.reader, self.writer = await asyncio.open_connection(
+                sock=sock,
+                ssl=ssl_context,
+                server_hostname=self.host if self.use_tls and self.tls_verify else None,
+            )
             return
 
         self.reader, self.writer = await asyncio.wait_for(
-            asyncio.open_connection(self.host, self.port, ssl=ssl_context),
+            asyncio.open_connection(
+                self.host,
+                self.port,
+                ssl=ssl_context,
+                server_hostname=self.host if self.use_tls and self.tls_verify else None,
+            ),
             timeout=self.timeout_seconds,
         )
 

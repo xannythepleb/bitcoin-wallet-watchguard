@@ -82,15 +82,28 @@ def _validate_encryption_metadata(config: dict[str, Any], label: str) -> None:
         raise ConfigError(f"Unsupported {label} KDF: {config['kdf']}")
 
 
+def _validate_boolish(config: dict[str, Any], key: str, label: str) -> None:
+    if key in config and not isinstance(config[key], bool):
+        raise ConfigError(f"{label}.{key} must be true or false")
+
+
 def validate_config(config: dict[str, Any]) -> None:
     for key in ["app", "electrum", "ntfy", "wallets"]:
         if key not in config:
             raise ConfigError(f"Missing required config section: {key}")
 
+    electrum = config["electrum"]
+    for key in ["host", "port", "tls"]:
+        if key not in electrum:
+            raise ConfigError(f"electrum config is missing required field: {key}")
+    _validate_boolish(electrum, "tls", "electrum")
+    _validate_boolish(electrum, "tls_verify", "electrum")
+
     ntfy = config["ntfy"]
     for key in ["server", "topic", "auth"]:
         if key not in ntfy:
             raise ConfigError(f"ntfy config is missing required field: {key}")
+    _validate_boolish(ntfy, "tls_verify", "ntfy")
 
     auth = ntfy["auth"]
     if not isinstance(auth, dict):
@@ -120,6 +133,13 @@ def validate_config(config: dict[str, Any]) -> None:
                 raise ConfigError(f"ntfy basic auth is missing required field: {key}")
         _validate_encryption_metadata(auth["username_encryption"], "ntfy username")
         _validate_encryption_metadata(auth["password_encryption"], "ntfy password")
+
+    mempool = config.get("mempool") or {}
+    if mempool:
+        _validate_boolish(mempool, "enabled", "mempool")
+        _validate_boolish(mempool, "tls_verify", "mempool")
+        if mempool.get("enabled") and not mempool.get("base_url"):
+            raise ConfigError("mempool.enabled is true but mempool.base_url is blank")
 
     if not isinstance(config["wallets"], list) or not config["wallets"]:
         raise ConfigError("Config must contain at least one wallet")
@@ -155,6 +175,7 @@ def default_config() -> dict[str, Any]:
                 "host": "127.0.0.1",
                 "port": 50002,
                 "tls": True,
+                "tls_verify": True,
                 "socks_proxy": None,
                 "timeout_seconds": 30,
             },
@@ -166,6 +187,15 @@ def default_config() -> dict[str, Any]:
                 },
                 "priority": "high",
                 "tags": "bitcoin,watch",
+                "tls_verify": True,
+                "timeout_seconds": 15,
+            },
+            "mempool": {
+                "enabled": False,
+                "base_url": "",
+                "tls_verify": True,
+                "timeout_seconds": 15,
+                "enrich_notifications": True,
             },
             "wallets": [],
         }
