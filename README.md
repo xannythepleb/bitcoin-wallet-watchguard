@@ -102,10 +102,28 @@ For existing configs without `electrum.tls_verify`, Wallet Watchguard automatica
 
 ## Address and balance listing
 
-List receive addresses and balances for each configured wallet:
+List receive addresses and balances. If more than one wallet is configured, Wallet Watchguard now asks which wallet you want to view:
 
 ```bash
 wwg addresses --config /data/config.yaml --limit 20
+```
+
+Show every configured wallet without prompting:
+
+```bash
+wwg addresses --config /data/config.yaml --all --limit 20
+```
+
+Limit to one wallet by exact name or unique partial name:
+
+```bash
+wwg addresses --config /data/config.yaml --wallet "Main Taproot wallet"
+```
+
+Limit to one wallet by its 1-based index in config:
+
+```bash
+wwg addresses --config /data/config.yaml --wallet-index 2
 ```
 
 Include change addresses:
@@ -120,11 +138,13 @@ Only show non-zero addresses:
 wwg addresses --config /data/config.yaml --only-nonzero --include-change --limit 100
 ```
 
-Limit to one wallet by name:
+Only show addresses that already have Electrum history:
 
 ```bash
-wwg addresses --config /data/config.yaml --wallet "Main Taproot wallet"
+wwg addresses --config /data/config.yaml --only-used --include-change --limit 100
 ```
+
+The address table includes a `used`/`unused` status column. Unused receive addresses are shown by default, even when their balance is zero.
 
 ## Optional Mempool API enrichment
 

@@ -21,7 +21,7 @@ from .crypto import (
     prompt_new_passphrase,
 )
 from .derivation import derive_addresses
-from .electrum import ElectrumClient
+from .electrum import ElectrumClient, default_tls_verify_for_host
 from .ntfy import NtfyNotifier, decrypt_ntfy_config
 from .watcher import Watcher, get_passphrase_from_env_or_prompt
 
@@ -172,9 +172,25 @@ def _prompt_electrum_config(existing_electrum: dict | None = None) -> dict[str, 
     electrum_port = int(_prompt("Electrum/Fulcrum port", str(current_port)))
     tls_verify = True
     if use_tls:
+        recommended_tls_verify = default_tls_verify_for_host(electrum_host)
+        existing_tls_verify = existing_electrum.get("tls_verify")
+
+        # Start9/StartOS, LAN IPs, .local names and onion services commonly use
+        # private/self-signed certificates. For those hosts, default to relaxed
+        # verification even if an older config/default merged tls_verify: true.
+        if recommended_tls_verify is False:
+            tls_verify_default = False
+            print()
+            print("This looks like a local/self-hosted Electrum/Fulcrum host.")
+            print("For Start9/StartOS or self-signed certificates, choose 'no' here.")
+        elif isinstance(existing_tls_verify, bool):
+            tls_verify_default = existing_tls_verify
+        else:
+            tls_verify_default = recommended_tls_verify
+
         tls_verify = _prompt_bool(
             "Verify Electrum/Fulcrum TLS certificate",
-            bool(existing_electrum.get("tls_verify", True)),
+            tls_verify_default,
         )
     socks_proxy = _prompt(
         "SOCKS5 proxy for onion host, blank for none",
@@ -595,42 +611,120 @@ async def _cmd_test_ntfy_async(config: dict, passphrase: str) -> None:
     )
 
 
+def _wallet_label(wallet: dict, index: int) -> str:
+    return f"{index + 1}. {wallet['name']} ({wallet['network']} / {wallet['wallet_type']})"
+
+
+def _select_wallets_for_addresses(config: dict, args: argparse.Namespace) -> list[dict]:
+    wallets = config.get("wallets") or []
+    if not wallets:
+        raise ValueError("No wallets are configured")
+
+    if getattr(args, "all", False):
+        return wallets
+
+    if args.wallet_index is not None:
+        index = int(args.wallet_index) - 1
+        if index < 0 or index >= len(wallets):
+            raise ValueError(f"Wallet index must be between 1 and {len(wallets)}")
+        return [wallets[index]]
+
+    if args.wallet:
+        requested = args.wallet.strip()
+        exact = [w for w in wallets if w["name"] == requested]
+        if exact:
+            return exact
+
+        requested_lower = requested.lower()
+        partial = [w for w in wallets if requested_lower in w["name"].lower()]
+        if len(partial) == 1:
+            return partial
+        if len(partial) > 1:
+            print("Multiple wallets matched:")
+            for i, wallet in enumerate(wallets):
+                if wallet in partial:
+                    print(f"  {_wallet_label(wallet, i)}")
+            raise ValueError("Please use the exact wallet name or --wallet-index")
+
+        print("Configured wallets:")
+        for i, wallet in enumerate(wallets):
+            print(f"  {_wallet_label(wallet, i)}")
+        raise ValueError(f"No wallet matched {requested!r}")
+
+    if len(wallets) == 1:
+        return [wallets[0]]
+
+    print()
+    print("Multiple wallets are configured.")
+    print("Choose which wallet to view, or type 'all' to show every wallet.")
+    print()
+    for i, wallet in enumerate(wallets):
+        print(f"  {_wallet_label(wallet, i)}")
+
+    while True:
+        choice = _prompt("Wallet number or all", "1").strip().lower()
+        if choice == "all":
+            return wallets
+        try:
+            index = int(choice) - 1
+        except ValueError:
+            print("Please enter a wallet number or 'all'.")
+            continue
+        if 0 <= index < len(wallets):
+            return [wallets[index]]
+        print(f"Please choose a number between 1 and {len(wallets)}, or 'all'.")
+
+
 async def _cmd_addresses_async(config: dict, passphrase: str, args: argparse.Namespace) -> None:
     client = _make_electrum_client(config)
     await client.connect()
     try:
-        wallets = config.get("wallets") or []
-        if args.wallet:
-            wallets = [w for w in wallets if w["name"] == args.wallet]
-            if not wallets:
-                raise ValueError(f"No wallet named {args.wallet!r} exists in config")
+        wallets = _select_wallets_for_addresses(config, args)
 
         for wallet in wallets:
             print()
             print(f"Wallet: {wallet['name']} ({wallet['network']} / {wallet['wallet_type']})")
-            print("-" * 88)
-            print(f"{'branch':<8} {'path':<18} {'confirmed':>14} {'unconfirmed':>14}  address")
-            print("-" * 88)
+            print("-" * 104)
+            print(f"{'branch':<8} {'path':<18} {'status':<8} {'confirmed':>14} {'unconfirmed':>14}  address")
+            print("-" * 104)
 
             branches = [0, 1] if args.include_change else [0]
             wallet_confirmed = 0
             wallet_unconfirmed = 0
+            printed_rows = 0
 
             for branch in branches:
                 label = "receive" if branch == 0 else "change"
                 derived = _derive_for_cli(config, wallet, passphrase, branch=branch, limit=args.limit)
                 for item in derived:
                     balance = await client.call("blockchain.scripthash.get_balance", [item.scripthash])
+                    history = await client.call("blockchain.scripthash.get_history", [item.scripthash])
                     confirmed = int(balance.get("confirmed") or 0)
                     unconfirmed = int(balance.get("unconfirmed") or 0)
+                    used = bool(history)
+                    status = "used" if used else "unused"
+
                     wallet_confirmed += confirmed
                     wallet_unconfirmed += unconfirmed
+
                     if args.only_nonzero and confirmed == 0 and unconfirmed == 0:
                         continue
-                    print(f"{label:<8} {item.path:<18} {confirmed:>14,} {unconfirmed:>14,}  {item.address}")
+                    if args.only_used and not used:
+                        continue
 
-            print("-" * 88)
-            print(f"{'total':<27} {wallet_confirmed:>14,} {wallet_unconfirmed:>14,}")
+                    printed_rows += 1
+                    print(
+                        f"{label:<8} {item.path:<18} {status:<8} "
+                        f"{confirmed:>14,} {unconfirmed:>14,}  {item.address}"
+                    )
+
+            if printed_rows == 0:
+                print("No addresses matched the selected filters.")
+                if args.only_nonzero or args.only_used:
+                    print("Try running without --only-nonzero/--only-used to show unused receive addresses.")
+
+            print("-" * 104)
+            print(f"{'total':<36} {wallet_confirmed:>14,} {wallet_unconfirmed:>14,}")
     finally:
         await client.close()
 
@@ -796,10 +890,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_addr.add_argument("--config", default="config.yaml")
     p_addr.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt/env")
-    p_addr.add_argument("--wallet", default=None, help="Only show one wallet by name")
+    p_addr.add_argument("--wallet", default=None, help="Only show one wallet by exact name or unique partial name")
+    p_addr.add_argument("--wallet-index", type=int, default=None, help="Only show one wallet by its 1-based index in config")
+    p_addr.add_argument("--all", action="store_true", help="Show every configured wallet without prompting")
     p_addr.add_argument("--limit", type=int, default=20, help="Number of receive/change addresses to derive per wallet")
     p_addr.add_argument("--include-change", action="store_true", help="Also list the change branch")
     p_addr.add_argument("--only-nonzero", action="store_true", help="Hide addresses with zero confirmed and unconfirmed balance")
+    p_addr.add_argument("--only-used", action="store_true", help="Hide addresses with no Electrum history")
     p_addr.set_defaults(func=cmd_addresses)
 
     return parser

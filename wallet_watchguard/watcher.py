@@ -136,7 +136,8 @@ class Watcher:
         print("Useful commands:", flush=True)
         print(f"  wwg test-ntfy --config {self.config_path}", flush=True)
         print(f"  wwg addresses --config {self.config_path} --limit 20", flush=True)
-        print(f"  wwg addresses --config {self.config_path} --include-change --limit 20", flush=True)
+        print(f'  wwg addresses --config {self.config_path} --wallet "<wallet name>" --limit 20', flush=True)
+        print(f"  wwg addresses --config {self.config_path} --all --include-change --limit 20", flush=True)
         print("", flush=True)
 
     async def _handle_notification(self, message: dict[str, Any]) -> None:
