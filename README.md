@@ -1,6 +1,6 @@
 # Bitcoin Wallet Watchguard
 
-**Say hello to a watch only Bitcoin wallet you can talk to.**
+**Say hello to a local encrypted watch only Bitcoin wallet you can talk to anywhere in the world.**
 
 Bitcoin Wallet Watchguard allows you to get notified of any transaction to or from your wallets by using the xpub. It then lets you talk to your wallet if you enable Conversation Mode, so you can query all your addresses, transactions, and more from your phone.
 
@@ -46,7 +46,7 @@ Wallet Watchguard publishes Docker images to GitHub automatically. Images are bu
 For example:
 
 ```bash
-docker pull ghcr.io/xannythepleb/wallet-watchguard:latest
+docker pull ghcr.io/xannythepleb/bitcoin-wallet-watchguard:latest
 ```
 
 ## Ntfy Test Command
@@ -62,6 +62,8 @@ With Docker Compose:
 ```bash
 WWG_PASSPHRASE='your passphrase here' docker compose run --rm wallet-watchguard wwg test-ntfy --config /data/config.yaml
 ```
+
+You can also store your `WWG_PASSPHRASE` in your `.env` for convenience, with obvious security tradeoffs.
 
 ## Start9 / StartOS Ntfy Setup
 
@@ -94,7 +96,7 @@ Phone/user account                -> read permission
 Anonymous access                  -> disabled unless deliberately needed
 ```
 
-## Start9 / Umbrel Self-Signed TLS certificates
+## Start9 / Umbrel Self-Signed TLS Certificates
 
 StartOS, Umbrel, and other local node systems often use private or self-signed TLS certificates. If you see an error like:
 
@@ -248,7 +250,7 @@ authenticated write: ok
 
 This means Wallet Watchguard has a write-only credential. Normal notifications will work, but Conversation Mode cannot receive commands. On Start9 this usually means you are still using a Provision Publisher token rather than a token created by a regular read-write user.
 
-## Optional Mempool API enrichment
+## Optional Mempool API Integration
 
 Fulcrum/Electrum remains the source of truth for wallet activity detection.
 
@@ -279,7 +281,7 @@ mempool:
   enrich_notifications: true
 ```
 
-## Docker Compose logs
+## Docker Compose Logs
 
 When running successfully, the daemon prints a non-secret startup summary to the logs:
 
