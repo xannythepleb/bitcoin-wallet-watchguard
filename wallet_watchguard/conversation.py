@@ -57,17 +57,54 @@ class ConversationBridge:
         check = await self.notifier.check_conversation_security(probe_anonymous_write=self.probe_anonymous_write)
         if check.protected_for_conversation:
             return
+
         details = "\n".join(f"- {line}" for line in check.details)
+        guidance = self._conversation_security_guidance(check)
         raise ConversationModeError(
-            "Conversation mode refused: ntfy topic is not protected enough for remote wallet queries.\n"
-            "Required: authenticated read, authenticated write, anonymous read denied, anonymous write denied.\n"
+            f"{guidance}\n"
+            "Required for Conversation Mode: authenticated read, authenticated write, anonymous read denied, anonymous write denied.\n"
             f"Check results:\n{details}"
         )
+
+    @staticmethod
+    def _conversation_security_guidance(check) -> str:
+        """Return a precise, user-facing reason for disabling Conversation Mode."""
+        anonymous_problem = not check.anonymous_read_blocked or not check.anonymous_write_blocked
+
+        if anonymous_problem:
+            return (
+                "Conversation Mode refused: the ntfy topic allows anonymous access, so it is not safe for "
+                "remote wallet queries. Block anonymous read and anonymous write access, then try again."
+            )
+
+        if not check.authenticated_read_ok and check.authenticated_write_ok:
+            return (
+                "Conversation Mode cannot start: Wallet Watchguard can publish to ntfy, but the configured "
+                "credentials do not have read/subscribe permission. Normal notifications can still work, but "
+                "Conversation Mode needs read access so it can receive commands. For Start9/StartOS, "
+                "Provision Publisher tokens are write-only; create a regular ntfy user, grant that user "
+                "read-write access to the topic, create an access token in the ntfy web UI, then update "
+                "Wallet Watchguard's ntfy config with that token."
+            )
+
+        if check.authenticated_read_ok and not check.authenticated_write_ok:
+            return (
+                "Conversation Mode cannot start: Wallet Watchguard can read the ntfy topic, but the configured "
+                "credentials cannot publish replies. Grant write permission to the same topic, then try again."
+            )
+
+        if not check.authenticated_read_ok and not check.authenticated_write_ok:
+            return (
+                "Conversation Mode cannot start: Wallet Watchguard's configured ntfy credentials cannot read "
+                "or publish to the topic. Check the token/username/password and the topic permissions."
+            )
+
+        return "Conversation Mode cannot start: the ntfy topic did not pass the required protection checks."
 
     async def run(self) -> None:
         since = int(time.time())
         print(
-            "Conversation mode is enabled. Listening for ntfy commands "
+            "Conversation Mode is enabled. Listening for ntfy commands "
             f"on topic {self.notifier.topic!r}.",
             flush=True,
         )

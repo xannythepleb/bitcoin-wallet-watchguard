@@ -133,7 +133,7 @@ class NtfyNotifier:
                 authenticated_write_ok=False,
                 anonymous_read_blocked=False,
                 anonymous_write_blocked=False,
-                details=["ntfy auth type must be token or basic for conversation mode"],
+                details=["ntfy auth type must be token or basic for Conversation Mode"],
             )
 
         auth_headers = self._auth_headers()
@@ -189,7 +189,7 @@ class NtfyNotifier:
                 details.append(f"anonymous read: failed to check {exc}")
 
             if not probe_anonymous_write:
-                details.append("anonymous write: not probed; refusing conversation mode")
+                details.append("anonymous write: not probed; refusing Conversation Mode")
             else:
                 try:
                     response = await client.post(

@@ -215,6 +215,10 @@ def _prompt_ntfy_start9_config(passphrase: str, existing_ntfy: dict | None = Non
     print()
     print("Start9 / StartOS ntfy publisher provisioning")
     print()
+    print("This flow is ideal for normal Wallet Watchguard notifications.")
+    print("Start9's 'Provision Publisher' creates a write-only publisher token for one topic.")
+    print("That is good for alerts, but it cannot be used for Conversation Mode because Conversation Mode must read/subscribe too.")
+    print()
     print("In your Start9 ntfy service UI, use 'Provision Publisher'.")
     print("For the reference name, something like 'wallet-watchguard' is fine.")
     print(f"For the topic name, use: {suggested_topic}")
@@ -227,6 +231,9 @@ def _prompt_ntfy_start9_config(passphrase: str, existing_ntfy: dict | None = Non
     print()
     print("Paste those values below. Wallet Watchguard will encrypt the token at rest.")
     print("The username is stored encrypted as publisher metadata, but token auth is used for publishing.")
+    print()
+    print("For Conversation Mode on Start9, do not use this write-only publisher token.")
+    print("Instead: create a regular ntfy user, grant it read-write access to the topic, log in as that user, create an access token, then configure Wallet Watchguard with that token.")
 
     publish_url = _prompt("publishUrl from Start9")
     topic = _prompt("topic from Start9", suggested_topic)
@@ -270,13 +277,14 @@ def _prompt_ntfy_config(passphrase: str, existing_ntfy: dict | None = None) -> d
     print()
     print("ntfy configuration")
     print("Recommendation: use a self-hosted ntfy instance with a dedicated Wallet Watchguard topic.")
-    print("A good setup is: Wallet Watchguard publisher/token = write access; phone/user account = read access.")
+    print("For normal notifications, a write-only publisher token is enough and is preferred.")
+    print("For Conversation Mode, Wallet Watchguard needs credentials that can both read and write the topic.")
     print("Avoid broad anonymous publish permissions unless you deliberately want that.")
 
     if existing_ntfy.get("topic"):
         print()
         print(f"Existing topic stored in config: {existing_ntfy['topic']}")
-        print("If you are provisioning a new Start9 publisher, use this exact topic name unless you want to change it.")
+        print("Use this exact topic name when creating Start9 publisher credentials or read-write Conversation Mode credentials, unless you want to change topics.")
 
     if _prompt_bool("Are you using Start9/StartOS 'Provision Publisher' details", False):
         return _prompt_ntfy_start9_config(passphrase, existing_ntfy)
@@ -333,6 +341,11 @@ def _prompt_ntfy_config(passphrase: str, existing_ntfy: dict | None = None) -> d
     print("  none  - no credentials; only sensible for LAN-only testing or a very locked-down private network")
     print("  token - ntfy access token / bearer token; recommended where available")
     print("  basic - username and password")
+    print()
+    print("Start9 note:")
+    print("  - Provision Publisher tokens are write-only and work for normal alerts.")
+    print("  - Conversation Mode needs read-write credentials.")
+    print("  - For Conversation Mode, create a regular ntfy user, grant it read-write access to the topic, then create an access token in the ntfy web UI.")
 
     existing_auth_type = auth.get("type", "token")
     if existing_auth_type not in ["none", "token", "basic"]:
@@ -430,11 +443,10 @@ def _prompt_conversation_config(existing_conversation: dict | None = None) -> di
     print()
     print("Use only with a private, password/token-protected ntfy topic.")
     print()
-    print("Everything is read only. No one can spend your Bitcoin through this.")
-    print("But if you want your transactions to remain private,")
-    print("I HIGHLY recommend using your own node and ntfy instance.")
+    print("Start9 note: Provision Publisher tokens are write-only, so they cannot be used for Conversation Mode.")
+    print("For Start9 Conversation Mode, create a regular ntfy user, grant it read-write topic access, log in as that user, create an access token, and configure Wallet Watchguard with that token.")
 
-    enabled = _prompt_bool("Enable Conversation Mode in config", bool(existing_conversation.get("enabled", False)))
+    enabled = _prompt_bool("Enable conversation Mode in config", bool(existing_conversation.get("enabled", False)))
     command_prefix = _prompt("Command prefix", str(existing_conversation.get("command_prefix", "wwg")))
 
     return {
@@ -998,7 +1010,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument(
         "--conversation",
         action="store_true",
-        help="Enable ntfy Conversation Mode for this run, subject to topic protection checks",
+        help="Enable ntfy conversation Mode for this run, subject to topic protection checks",
     )
     p_run.set_defaults(func=cmd_run)
 

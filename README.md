@@ -6,7 +6,7 @@ All of this is made possible by [ntfy](https://github.com/binwiederhier/ntfy), a
 
 Your xpub is only ever stored locally on the machine you install Wallet Watchguard on. It is encrypted at rest using libsodium and Argon2id.
 
-## First-time setup
+## First Time Setup
 
 Local:
 
@@ -37,7 +37,7 @@ wwg init --config /data/config.yaml --add app
 wwg init --config /data/config.yaml --reset
 ```
 
-## ntfy test command
+## Ntfy Test Command
 
 After configuring ntfy, send a test notification:
 
@@ -51,7 +51,7 @@ With Docker Compose:
 WWG_PASSPHRASE='your passphrase here' docker compose run --rm wallet-watchguard wwg test-ntfy --config /data/config.yaml
 ```
 
-## Start9 / StartOS ntfy setup
+## Start9 / StartOS Ntfy Setup
 
 If you use Start9/StartOS ntfy, run:
 
@@ -82,9 +82,9 @@ Phone/user account                -> read permission
 Anonymous access                  -> disabled unless deliberately needed
 ```
 
-## Start9 / self-signed TLS certificates
+## Start9 / Umbrel Self-Signed TLS certificates
 
-Start9/StartOS and other local-node systems often use private or self-signed TLS certificates. If you see an error like:
+StartOS, Umbrel, and other local node systems often use private or self-signed TLS certificates. If you see an error like:
 
 ```text
 [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain
@@ -102,7 +102,7 @@ TLS encryption still remains enabled; only public CA/hostname verification is sk
 
 For existing configs without `electrum.tls_verify`, Wallet Watchguard automatically relaxes Electrum TLS verification for localhost, private IPs, `.local`, `.lan`, `.onion`, and similar local targets.
 
-## Address and balance listing
+## Address and Balance Listing
 
 List receive addresses and balances. If more than one wallet is configured, Wallet Watchguard now asks which wallet you want to view:
 
@@ -148,7 +148,7 @@ wwg addresses --config /data/config.yaml --only-used --include-change --limit 10
 
 The address table includes a `used`/`unused` status column. Unused receive addresses are shown by default, even when their balance is zero.
 
-## Conversation Mode: Talk to your wallet anywhere
+## Conversation Mode: Talk to Your Wallet Anywhere
 
 Conversation Mode lets you query Wallet Watchguard remotely through ntfy. You can keep an eye on even your hardware cold storage wherever you are via 100% self-hosted infrastructure. No third party middleman if you configure it correctly with your own node and your own ntfy instance. You can run both of these on your own physical hardware using Start9 or Umbrel for true sovereignty.
 
@@ -180,6 +180,8 @@ anonymous write is denied
 
 If the topic is public, or anonymous read/write is allowed, Wallet Watchguard will continue normal wallet monitoring but will not honour conversation mode.
 
+### Conversation Commands
+
 Example ntfy commands:
 
 ```text
@@ -195,6 +197,44 @@ wwg balance
 The default command prefix is `wwg`. The prefix avoids accidental replies to unrelated messages on the same topic.
 
 Conversation mode performs an anonymous write probe on startup because ntfy's normal client APIs can publish, subscribe and authenticate, but do not expose a harmless per-topic ACL inspection endpoint for ordinary clients. The probe uses `Cache: no`, `Firebase: no` and minimum priority. If that anonymous probe succeeds, conversation mode is refused.
+
+### Start9 / StartOS Conversation Mode Setup
+
+For Start9/StartOS, **Provision Publisher is not enough for Conversation Mode**. Provision Publisher creates a write-only token, which is ideal for normal alerts but cannot subscribe/read commands.
+
+Use this process instead:
+
+```text
+1. In the Start9 ntfy service, create a regular user, e.g. wallet-watchguard.
+2. Grant that user read-write access to the Wallet Watchguard topic.
+3. Log into the ntfy web UI as that user.
+4. Create an access token manually in the ntfy web UI.
+5. Run: wwg init --config /data/config.yaml --add ntfy
+6. Choose token auth and paste that access token.
+7. Keep anonymous read and anonymous write denied.
+```
+
+This probably sounds more complicated than it really is. All you have to do is make a new user with read and write permissions in StartOS, use that user's details to login, and make an access token through ntfy instead of using the StartOS UI. Use this token to configure ntfy for WWG and Conversation Mode will work.
+
+You can use the same topic as your normal alerts. If your existing config already stores a topic name, the wizard will remind you of it so you can grant access to the correct topic.
+
+The expected Conversation Mode protection check is:
+
+```text
+authenticated read: ok
+authenticated write: ok
+anonymous read: blocked HTTP 401/403
+anonymous write: blocked HTTP 401/403
+```
+
+If you see:
+
+```text
+authenticated read: failed HTTP 403
+authenticated write: ok
+```
+
+This means Wallet Watchguard has a write-only credential. Normal notifications will work, but Conversation Mode cannot receive commands. On Start9 this usually means you are still using a Provision Publisher token rather than a token created by a regular read-write user.
 
 ## Optional Mempool API enrichment
 
@@ -248,8 +288,8 @@ View logs:
 docker compose logs -f wallet-watchguard
 ```
 
-## Security notes
+## Security Notes
 
 The xpub and ntfy credentials are encrypted at rest using the Wallet Watchguard passphrase. You need this passphrase whenever the daemon starts.
 
-An xpub cannot spend funds, but it can reveal wallet history and future addresses. Run Wallet Watchguard on infrastructure you control, and prefer your own Bitcoin node, Fulcrum and ntfy instance.
+An xpub cannot spend funds, but it can reveal wallet history and future addresses. Run Wallet Watchguard on infrastructure you control, including your own Bitcoin node, Fulcrum, and ntfy instance for the highest level of privacy.
