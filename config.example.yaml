@@ -17,12 +17,20 @@ electrum:
   timeout_seconds: 30
 
 # Strongly recommended: use a self-hosted ntfy instance and a random private topic.
+# The setup wizard writes the encrypted auth fields for you.
 ntfy:
   server: "https://ntfy.example.com"
   topic: "wallet-watchguard-c3f7b6e63b11405fb911"
-  token: null
-  username: null
-  password: null
+  auth:
+    # none/token/basic
+    type: "token"
+    encrypted_token: "REPLACE_WITH_SECRETBOX_CIPHERTEXT"
+    token_encryption:
+      scheme: "pynacl-secretbox-argon2id-v1"
+      kdf: "argon2id"
+      opslimit: 3
+      memlimit: 268435456
+      salt: "REPLACE_WITH_BASE64_SALT"
   priority: "high"
   tags: "bitcoin,watch"
 

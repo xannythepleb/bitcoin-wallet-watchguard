@@ -25,20 +25,16 @@ class NtfyNotifier:
         }
 
         auth = None
-
         if self.auth_type == "token":
             if not self.token:
                 raise ValueError("ntfy auth type is token, but no token was configured")
             headers["Authorization"] = f"Bearer {self.token}"
-
         elif self.auth_type == "basic":
             if not self.username or not self.password:
                 raise ValueError("ntfy auth type is basic, but username/password were not configured")
             auth = (self.username, self.password)
-
         elif self.auth_type == "none":
             pass
-
         else:
             raise ValueError(f"Unsupported ntfy auth type: {self.auth_type}")
 

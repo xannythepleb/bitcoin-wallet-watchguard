@@ -16,6 +16,15 @@ def load_config(path: str | Path) -> dict[str, Any]:
     with Path(path).open("r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
 
+    validate_config(data)
+    return data
+
+
+def save_config(path: str | Path, config: dict[str, Any]) -> None:
+    with Path(path).open("w", encoding="utf-8") as f:
+        yaml.safe_dump(config, f, sort_keys=False)
+
+
 def _validate_encryption_metadata(config: dict[str, Any], label: str) -> None:
     if not isinstance(config, dict):
         raise ConfigError(f"{label} encryption metadata must be an object")
@@ -31,30 +40,12 @@ def _validate_encryption_metadata(config: dict[str, Any], label: str) -> None:
         raise ConfigError(f"Unsupported {label} KDF: {config['kdf']}")
 
 
-    validate_config(data)
-    return data
-
-
-def save_config(path: str | Path, config: dict[str, Any]) -> None:
-    with Path(path).open("w", encoding="utf-8") as f:
-        yaml.safe_dump(config, f, sort_keys=False)
-
-
 def validate_config(config: dict[str, Any]) -> None:
     for key in ["app", "electrum", "ntfy", "wallets"]:
         if key not in config:
             raise ConfigError(f"Missing required config section: {key}")
 
-    if not isinstance(config["wallets"], list) or not config["wallets"]:
-        raise ConfigError("Config must contain at least one wallet")
-
-    for wallet in config["wallets"]:
-        for key in ["name", "network", "wallet_type", "account_path", "encrypted_xpub", "xpub_encryption"]:
-            if key not in wallet:
-                raise ConfigError(f"Wallet is missing required field: {key}")
-
     ntfy = config["ntfy"]
-
     for key in ["server", "topic", "auth"]:
         if key not in ntfy:
             raise ConfigError(f"ntfy config is missing required field: {key}")
@@ -80,6 +71,14 @@ def validate_config(config: dict[str, Any]) -> None:
         _validate_encryption_metadata(auth["username_encryption"], "ntfy username")
         _validate_encryption_metadata(auth["password_encryption"], "ntfy password")
 
+    if not isinstance(config["wallets"], list) or not config["wallets"]:
+        raise ConfigError("Config must contain at least one wallet")
+
+    for wallet in config["wallets"]:
+        for key in ["name", "network", "wallet_type", "account_path", "encrypted_xpub", "xpub_encryption"]:
+            if key not in wallet:
+                raise ConfigError(f"Wallet is missing required field: {key}")
+
         wallet_type = wallet["wallet_type"]
         if wallet_type not in ["taproot", "native_segwit", "nested_segwit", "legacy"]:
             raise ConfigError(f"Unsupported wallet_type: {wallet_type}")
@@ -88,19 +87,7 @@ def validate_config(config: dict[str, Any]) -> None:
         if network not in ["bitcoin", "testnet", "signet", "regtest"]:
             raise ConfigError(f"Unsupported network: {network}")
 
-        encryption = wallet["xpub_encryption"]
-        if not isinstance(encryption, dict):
-            raise ConfigError("Wallet xpub_encryption must be an object")
-
-        for key in ["scheme", "kdf", "opslimit", "memlimit", "salt"]:
-            if key not in encryption:
-                raise ConfigError(f"Wallet xpub_encryption is missing required field: {key}")
-
-        if encryption["scheme"] != SCHEME:
-            raise ConfigError(f"Unsupported xpub encryption scheme: {encryption['scheme']}")
-
-        if encryption["kdf"] != "argon2id":
-            raise ConfigError(f"Unsupported xpub KDF: {encryption['kdf']}")
+        _validate_encryption_metadata(wallet["xpub_encryption"], "wallet xpub")
 
 
 def default_config() -> dict[str, Any]:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import secrets
 import sys
 from pathlib import Path
@@ -9,7 +10,12 @@ from pathlib import Path
 import yaml
 
 from .config import default_config, load_config, save_config
-from .crypto import encrypt_xpub_with_passphrase, prompt_new_passphrase
+from .crypto import (
+    encrypt_string_with_passphrase,
+    encrypt_xpub_with_passphrase,
+    metadata_to_config,
+    prompt_new_passphrase,
+)
 from .watcher import Watcher, get_passphrase_from_env_or_prompt
 
 
@@ -17,6 +23,10 @@ def _prompt(label: str, default: str | None = None) -> str:
     suffix = f" [{default}]" if default is not None else ""
     value = input(f"{label}{suffix}: ").strip()
     return value or (default or "")
+
+
+def _prompt_secret(label: str) -> str:
+    return getpass.getpass(f"{label}: ").strip()
 
 
 def _prompt_bool(label: str, default: bool = True) -> bool:
@@ -27,14 +37,9 @@ def _prompt_bool(label: str, default: bool = True) -> bool:
     return value in ["y", "yes", "true", "1"]
 
 
-def _encryption_metadata_to_config(metadata) -> dict[str, object]:
-    return {
-        "scheme": metadata.scheme,
-        "kdf": metadata.kdf,
-        "opslimit": metadata.opslimit,
-        "memlimit": metadata.memlimit,
-        "salt": metadata.salt_b64,
-    }
+def _encrypted_config_value(value: str, passphrase: str) -> tuple[str, dict[str, object]]:
+    encrypted_value, metadata = encrypt_string_with_passphrase(value, passphrase)
+    return encrypted_value, metadata_to_config(metadata)
 
 
 def _print_missing_config_help(config_path: Path) -> None:
@@ -57,6 +62,76 @@ def _print_missing_config_help(config_path: Path) -> None:
     print(file=sys.stderr)
 
 
+def _prompt_ntfy_config(passphrase: str) -> dict[str, object]:
+    print()
+    print("ntfy configuration")
+    print("Recommendation: use a self-hosted ntfy instance with a dedicated Wallet Watchguard topic.")
+    print("For locked-down instances such as Start9, create or choose a topic that Wallet Watchguard can publish to.")
+    print("A good setup is: Wallet Watchguard user/token = write access; phone/user account = read access.")
+    print()
+
+    ntfy_server = _prompt("ntfy server URL", "https://ntfy.example.com")
+    random_topic = f"wallet-watchguard-{secrets.token_hex(12)}"
+    ntfy_topic = _prompt("Private ntfy topic", random_topic)
+
+    print()
+    print("Choose ntfy authentication mode:")
+    print("  none  - no credentials; only sensible for LAN-only testing or a very locked-down private network")
+    print("  token - ntfy access token / bearer token; recommended where available")
+    print("  basic - username and password")
+    auth_type = _prompt("Auth mode: none/token/basic", "token").lower()
+
+    if auth_type not in ["none", "token", "basic"]:
+        raise ValueError("ntfy auth mode must be one of: none, token, basic")
+
+    auth: dict[str, object] = {"type": auth_type}
+
+    if auth_type == "token":
+        print()
+        print("Enter the ntfy access token for Wallet Watchguard.")
+        print("This will be encrypted in config.yaml using the same passphrase as your xpub.")
+        token = _prompt_secret("ntfy access token")
+        if not token:
+            raise ValueError("ntfy token must not be blank when auth mode is token")
+        encrypted_token, token_encryption = _encrypted_config_value(token, passphrase)
+        auth.update(
+            {
+                "encrypted_token": encrypted_token,
+                "token_encryption": token_encryption,
+            }
+        )
+
+    elif auth_type == "basic":
+        print()
+        print("Enter the ntfy username/password for Wallet Watchguard.")
+        print("Both values will be encrypted in config.yaml using the same passphrase as your xpub.")
+        username = _prompt_secret("ntfy username")
+        password = _prompt_secret("ntfy password")
+        if not username:
+            raise ValueError("ntfy username must not be blank when auth mode is basic")
+        if not password:
+            raise ValueError("ntfy password must not be blank when auth mode is basic")
+
+        encrypted_username, username_encryption = _encrypted_config_value(username, passphrase)
+        encrypted_password, password_encryption = _encrypted_config_value(password, passphrase)
+        auth.update(
+            {
+                "encrypted_username": encrypted_username,
+                "username_encryption": username_encryption,
+                "encrypted_password": encrypted_password,
+                "password_encryption": password_encryption,
+            }
+        )
+
+    return {
+        "server": ntfy_server,
+        "topic": ntfy_topic,
+        "auth": auth,
+        "priority": "high",
+        "tags": "bitcoin,watch",
+    }
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     config_path = Path(args.config)
     config = default_config()
@@ -66,6 +141,11 @@ def cmd_init(args: argparse.Namespace) -> int:
     print("Privacy recommendation: use your own Bitcoin node + Fulcrum, and your own self-hosted ntfy instance.")
     print("Using public Electrum servers with an xpub-derived watcher can leak wallet activity.")
     print()
+
+    print("First, set the passphrase used to encrypt sensitive values in config.yaml.")
+    print("This passphrase encrypts your xpub and ntfy credentials at rest.")
+    print("You will need it whenever Wallet Watchguard starts.")
+    passphrase = prompt_new_passphrase()
 
     electrum_host = _prompt("Electrum/Fulcrum host", "127.0.0.1")
     use_tls = _prompt_bool("Use TLS", True)
@@ -81,17 +161,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         "timeout_seconds": 30,
     }
 
-    print()
-    print("ntfy configuration")
-    print("Recommendation: use a self-hosted ntfy instance with a long random private topic name.")
-    ntfy_server = _prompt("ntfy server URL", "https://ntfy.example.com")
-    random_topic = f"wallet-watchguard-{secrets.token_hex(12)}"
-    ntfy_topic = _prompt("Private ntfy topic", random_topic)
-    ntfy_token = _prompt("ntfy bearer token, blank for none", "")
-
-    config["ntfy"]["server"] = ntfy_server
-    config["ntfy"]["topic"] = ntfy_topic
-    config["ntfy"]["token"] = ntfy_token or None
+    config["ntfy"] = _prompt_ntfy_config(passphrase)
 
     print()
     print("Wallet configuration")
@@ -107,11 +177,6 @@ def cmd_init(args: argparse.Namespace) -> int:
     account_path = _prompt("Account derivation path metadata", account_path_default)
     xpub = _prompt("Account xpub")
 
-    print()
-    print("Set the passphrase used to encrypt the xpub at rest.")
-    print("You will need this passphrase whenever Wallet Watchguard starts.")
-    passphrase = prompt_new_passphrase()
-
     encrypted_xpub, metadata = encrypt_xpub_with_passphrase(xpub, passphrase)
 
     config["wallets"].append(
@@ -120,7 +185,7 @@ def cmd_init(args: argparse.Namespace) -> int:
             "network": network,
             "wallet_type": wallet_type,
             "account_path": account_path,
-            "xpub_encryption": _encryption_metadata_to_config(metadata),
+            "xpub_encryption": metadata_to_config(metadata),
             "encrypted_xpub": encrypted_xpub,
             "receive_path_template": _prompt("Receive path template", "0/*"),
             "change_path_template": _prompt("Change path template", "1/*"),
@@ -144,7 +209,7 @@ def cmd_encrypt_xpub(args: argparse.Namespace) -> int:
     encrypted_xpub, metadata = encrypt_xpub_with_passphrase(args.xpub, passphrase)
 
     snippet = {
-        "xpub_encryption": _encryption_metadata_to_config(metadata),
+        "xpub_encryption": metadata_to_config(metadata),
         "encrypted_xpub": encrypted_xpub,
     }
     print(yaml.safe_dump(snippet, sort_keys=False))

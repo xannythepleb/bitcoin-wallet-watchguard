@@ -5,8 +5,9 @@ import os
 from typing import Any
 
 from .crypto import (
-    XpubEncryptionMetadata,
+    decrypt_string_with_passphrase,
     decrypt_xpub_with_passphrase,
+    metadata_from_config,
     prompt_existing_passphrase,
 )
 from .db import Database
@@ -32,8 +33,47 @@ class Watcher:
             socks_proxy=electrum.get("socks_proxy"),
             timeout_seconds=int(electrum.get("timeout_seconds", 30)),
         )
-        self.notifier = NtfyNotifier(config["ntfy"])
+        self.notifier = NtfyNotifier(self._decrypt_ntfy_config(config["ntfy"]))
         self._subscriptions_ready = asyncio.Event()
+
+    def _decrypt_ntfy_config(self, ntfy_config: dict[str, Any]) -> dict[str, Any]:
+        auth = dict(ntfy_config.get("auth") or {"type": "none"})
+        auth_type = auth.get("type", "none")
+
+        decrypted_auth: dict[str, Any] = {"type": auth_type}
+
+        if auth_type == "token":
+            decrypted_auth["token"] = decrypt_string_with_passphrase(
+                encrypted_value_b64=auth["encrypted_token"],
+                passphrase=self.passphrase,
+                metadata=metadata_from_config(auth["token_encryption"]),
+                secret_name="ntfy token",
+            )
+        elif auth_type == "basic":
+            decrypted_auth["username"] = decrypt_string_with_passphrase(
+                encrypted_value_b64=auth["encrypted_username"],
+                passphrase=self.passphrase,
+                metadata=metadata_from_config(auth["username_encryption"]),
+                secret_name="ntfy username",
+            )
+            decrypted_auth["password"] = decrypt_string_with_passphrase(
+                encrypted_value_b64=auth["encrypted_password"],
+                passphrase=self.passphrase,
+                metadata=metadata_from_config(auth["password_encryption"]),
+                secret_name="ntfy password",
+            )
+        elif auth_type == "none":
+            pass
+        else:
+            raise ValueError(f"Unsupported ntfy auth type: {auth_type}")
+
+        return {
+            "server": ntfy_config["server"],
+            "topic": ntfy_config["topic"],
+            "auth": decrypted_auth,
+            "priority": ntfy_config.get("priority", "default"),
+            "tags": ntfy_config.get("tags", "bitcoin"),
+        }
 
     async def run(self) -> None:
         await self.db.connect()
@@ -54,14 +94,7 @@ class Watcher:
         default_lookahead = int(self.config["app"].get("lookahead", 100))
 
         for wallet in self.config["wallets"]:
-            encryption = wallet["xpub_encryption"]
-            metadata = XpubEncryptionMetadata(
-                scheme=encryption["scheme"],
-                kdf=encryption["kdf"],
-                opslimit=int(encryption["opslimit"]),
-                memlimit=int(encryption["memlimit"]),
-                salt_b64=encryption["salt"],
-            )
+            metadata = metadata_from_config(wallet["xpub_encryption"])
             xpub = decrypt_xpub_with_passphrase(
                 encrypted_xpub_b64=wallet["encrypted_xpub"],
                 passphrase=self.passphrase,
@@ -150,11 +183,11 @@ class Watcher:
 
 
 def get_passphrase_from_env_or_prompt() -> str:
-    passphrase = os.environ.get("WWG_PASSPHRASE")
-
-    if passphrase is not None:
-        if not passphrase:
+    value = os.environ.get("WWG_PASSPHRASE")
+    if value is not None:
+        value = value.strip()
+        if not value:
             raise ValueError("WWG_PASSPHRASE must not be blank")
-        return passphrase
+        return value
 
     return prompt_existing_passphrase()

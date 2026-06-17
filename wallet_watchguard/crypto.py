@@ -20,7 +20,7 @@ class SecretEncryptionMetadata:
     salt_b64: str
 
 
-# Backwards-compatible alias for existing xpub code/imports.
+# Keep the old name as an alias so existing imports/config helpers keep working.
 XpubEncryptionMetadata = SecretEncryptionMetadata
 
 
@@ -44,6 +44,9 @@ def derive_key_from_passphrase(
 ) -> bytes:
     """
     Derive a 32-byte SecretBox key from a user passphrase using Argon2id.
+
+    Argon2id is deliberately memory-hard, making brute-force attacks more
+    expensive than they would be with a plain hash.
     """
     if not passphrase:
         raise ValueError("Passphrase must not be blank")
@@ -63,6 +66,9 @@ def encrypt_string_with_passphrase(
 ) -> tuple[str, SecretEncryptionMetadata]:
     """
     Encrypt a UTF-8 string using a passphrase-derived SecretBox key.
+
+    The returned metadata contains the KDF parameters needed to derive the same
+    key again later. It does not contain the passphrase or a password hash.
     """
     if plaintext is None:
         raise ValueError("Plaintext must not be None")
@@ -130,7 +136,6 @@ def encrypt_xpub_with_passphrase(
 ) -> tuple[str, SecretEncryptionMetadata]:
     if not xpub:
         raise ValueError("xpub must not be blank")
-
     return encrypt_string_with_passphrase(xpub, passphrase)
 
 

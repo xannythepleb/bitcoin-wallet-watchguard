@@ -18,7 +18,7 @@ This is a v0.1 starter scaffold. It gives you the core shape:
 - raw async Electrum JSON-RPC client
 - SQLite schema
 - ntfy publisher
-- passphrase-based xpub encryption at rest using Argon2id + SecretBox
+- passphrase-based xpub and ntfy credential encryption at rest using Argon2id + SecretBox
 - Rust derivation helper for Taproot, Native SegWit, Nested SegWit, and Legacy address generation
 - Docker Compose deployment skeleton
 
@@ -36,11 +36,17 @@ For best privacy and security:
 
 An xpub cannot spend funds, but it can reveal wallet activity. Treat it as sensitive.
 
-## Xpub encryption model
+## Encryption model
 
-Wallet Watchguard stores encrypted xpubs in `config.yaml`.
+Wallet Watchguard stores sensitive values encrypted in `config.yaml`.
 
-The app no longer uses an X25519 private key at launch. Instead, it prompts for a passphrase and derives an encryption key using Argon2id. The encrypted xpub itself acts as the passphrase check: if the passphrase is wrong, decryption fails.
+Currently encrypted values include:
+
+- wallet xpubs
+- ntfy access tokens, if token auth is used
+- ntfy usernames and passwords, if basic auth is used
+
+The app prompts for a passphrase and derives encryption keys using Argon2id. The encrypted value itself acts as the passphrase check: if the passphrase is wrong, decryption fails.
 
 The config stores KDF metadata such as salt and Argon2id limits, but it does not store the passphrase or a separate passphrase hash.
 
@@ -88,7 +94,13 @@ Build first:
 docker compose build
 ```
 
-Run:
+Run the setup wizard inside Docker:
+
+```bash
+docker compose run --rm wallet-watchguard wwg init --config /data/config.yaml
+```
+
+Then run the daemon:
 
 ```bash
 WWG_PASSPHRASE="your long passphrase here" docker compose up -d
@@ -100,8 +112,6 @@ Or use a local `.env` file that is not committed to git:
 WWG_PASSPHRASE=your long passphrase here
 ```
 
-The Compose file intentionally fails fast if `WWG_PASSPHRASE` is missing or blank.
-
 ## Electrum/Fulcrum URLs
 
 - unencrypted TCP usually uses port `50001`
@@ -112,19 +122,24 @@ The Compose file intentionally fails fast if `WWG_PASSPHRASE` is missing or blan
 
 Use a long random topic name and restrict permissions on your ntfy server.
 
+For a locked-down Start9/StartOS-style ntfy setup, the recommended pattern is:
+
+- create a dedicated topic for Wallet Watchguard, preferably with the wizard-generated random name
+- give Wallet Watchguard a dedicated ntfy token/user with write permission to that topic
+- give your phone/subscriber user read permission to that topic
+- avoid broad anonymous publish permissions such as `up*` or unrestricted wildcard topics
+
+The setup wizard supports three ntfy auth modes:
+
+- `token` - recommended where supported; stores an encrypted bearer/access token
+- `basic` - stores encrypted username and password
+- `none` - only sensible for LAN-only testing or a tightly controlled private setup
+
 Example topic:
 
 ```text
 wallet-watchguard-c3f7b6e63b11405fb911
 ```
-
-Example publish URL:
-
-```text
-https://ntfy.example.com/wallet-watchguard-c3f7b6e63b11405fb911
-```
-
-Use a token or HTTP basic auth if your ntfy instance requires it.
 
 ## Notes on derivation
 
