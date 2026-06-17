@@ -164,3 +164,55 @@ Hardened derivation cannot be performed from an xpub.
 The derivation helper should be built with Rust 1.85 or newer. Rust 1.85 stabilised the 2024 edition; older Cargo versions such as 1.82 can fail when resolving newer dependencies with an `edition2024` error.
 
 The Dockerfile therefore uses `rust:1-bookworm` for the build stage. For local builds, the helper includes `derivation-helper/rust-toolchain.toml` pinned to Rust 1.85.0 as the minimum known-good toolchain.
+
+## Updating an existing config
+
+`wwg init` is additive. If the config file already exists, the wizard asks whether you want to update part of the existing config, reset it, or exit without changes.
+
+```bash
+wwg init --config config.yaml
+```
+
+You can also jump directly to a specific section:
+
+```bash
+wwg init --config config.yaml --add ntfy
+wwg init --config config.yaml --add electrum
+wwg init --config config.yaml --add wallet
+wwg init --config config.yaml --add app
+```
+
+With Docker Compose:
+
+```bash
+docker compose run --rm wallet-watchguard wwg init --config /data/config.yaml --add ntfy
+```
+
+Reset the config deliberately with:
+
+```bash
+wwg init --config config.yaml --reset
+```
+
+## Start9 / StartOS ntfy publisher setup
+
+For Start9 or StartOS ntfy instances, use the ntfy service UI to **Provision Publisher**.
+
+Recommended setup:
+
+1. Use a reference name such as `wallet-watchguard`.
+2. Use the topic name already stored in your config if one exists; the wizard prints it for you.
+3. Give Wallet Watchguard publish/write access to that topic.
+4. Give your phone or normal ntfy user read access to that topic.
+5. Avoid broad anonymous publish permissions.
+
+The Start9 dialogue provides:
+
+```text
+publishUrl
+token
+topic
+username
+```
+
+When the wizard asks whether you are using Start9/StartOS provision-publisher details, answer yes and paste those values in. Wallet Watchguard stores the token encrypted with the same passphrase used for wallet xpubs. The Start9 username is stored encrypted as publisher metadata; the token is what Wallet Watchguard uses to publish notifications.

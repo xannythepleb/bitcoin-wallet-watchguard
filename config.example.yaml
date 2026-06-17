@@ -18,6 +18,8 @@ electrum:
 
 # Strongly recommended: use a self-hosted ntfy instance and a random private topic.
 # The setup wizard writes the encrypted auth fields for you.
+# For Start9/StartOS, use "Provision Publisher" in the ntfy UI, then paste the
+# publishUrl/token/topic/username values into `wwg init --add ntfy`.
 ntfy:
   server: "https://ntfy.example.com"
   topic: "wallet-watchguard-c3f7b6e63b11405fb911"
@@ -31,6 +33,14 @@ ntfy:
       opslimit: 3
       memlimit: 268435456
       salt: "REPLACE_WITH_BASE64_SALT"
+    # Optional encrypted metadata from Start9/StartOS provision-publisher dialogue.
+    encrypted_publisher_username: "OPTIONAL_SECRETBOX_CIPHERTEXT"
+    publisher_username_encryption:
+      scheme: "pynacl-secretbox-argon2id-v1"
+      kdf: "argon2id"
+      opslimit: 3
+      memlimit: 268435456
+      salt: "OPTIONAL_BASE64_SALT"
   priority: "high"
   tags: "bitcoin,watch"
 
