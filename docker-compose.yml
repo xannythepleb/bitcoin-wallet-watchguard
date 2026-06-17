@@ -4,6 +4,9 @@ services:
     container_name: wallet-watchguard
     restart: unless-stopped
     environment:
+      # Docker default config path. When running directly on the OS,
+      # Wallet Watchguard defaults to ./config.yaml unless WWG_CONFIG_PATH is set.
+      WWG_CONFIG_PATH: /data/config.yaml
       # Needed only for `wwg run`, not for `wwg init`.
       # Do not commit this. Prefer a local .env file outside git.
       WWG_PASSPHRASE: ${WWG_PASSPHRASE:-}

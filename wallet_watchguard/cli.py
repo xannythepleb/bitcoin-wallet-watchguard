@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
+import os
 import secrets
 import sys
 from pathlib import Path
@@ -27,6 +28,11 @@ from .watcher import Watcher, get_passphrase_from_env_or_prompt
 
 
 INIT_SECTIONS = ["full", "electrum", "ntfy", "wallet", "app", "mempool", "conversation"]
+
+# Docker Compose sets this to /data/config.yaml.
+# When running directly on the OS, the default remains ./config.yaml.
+# Explicit --config always overrides this value.
+DEFAULT_CONFIG_PATH = os.environ.get("WWG_CONFIG_PATH", "./config.yaml")
 
 
 def _prompt(label: str, default: str | None = None) -> str:
@@ -87,6 +93,10 @@ def _print_missing_config_help(config_path: Path) -> None:
 def _config_has_encrypted_values(config: dict) -> bool:
     ntfy_auth = (config.get("ntfy") or {}).get("auth") or {}
     if ntfy_auth.get("encrypted_token") or ntfy_auth.get("encrypted_password"):
+        return True
+
+    conversation_auth = (config.get("conversation") or {}).get("auth") or {}
+    if conversation_auth.get("encrypted_token") or conversation_auth.get("encrypted_password"):
         return True
 
     for wallet in config.get("wallets") or []:
@@ -429,8 +439,16 @@ def _prompt_mempool_config(existing_mempool: dict | None = None) -> dict[str, ob
     }
 
 
-def _prompt_conversation_config(existing_conversation: dict | None = None) -> dict[str, object]:
+def _prompt_conversation_config(
+    passphrase: str,
+    existing_conversation: dict | None = None,
+    existing_ntfy: dict | None = None,
+) -> dict[str, object]:
     existing_conversation = existing_conversation or {}
+    existing_ntfy = existing_ntfy or {}
+    existing_ntfy_auth = existing_ntfy.get("auth") or {"type": "none"}
+    existing_ntfy_auth_type = str(existing_ntfy_auth.get("type", "none"))
+    existing_ntfy_topic = str(existing_ntfy.get("topic") or "wallet-watchguard-replace-me").strip("/")
 
     print()
     print("Conversation Mode")
@@ -445,12 +463,59 @@ def _prompt_conversation_config(existing_conversation: dict | None = None) -> di
     print()
     print("Start9 note: Provision Publisher tokens are write-only, so they cannot be used for Conversation Mode.")
     print("For Start9 Conversation Mode, create a regular ntfy user, grant it read-write topic access, log in as that user, create an access token, and configure Wallet Watchguard with that token.")
+    print()
+    print("You can use the same ntfy topic as normal alerts, or create a separate topic to keep Conversation Mode commands tidy.")
 
-    enabled = _prompt_bool("Enable conversation Mode in config", bool(existing_conversation.get("enabled", False)))
+    enabled = _prompt_bool("Enable Conversation Mode in config", bool(existing_conversation.get("enabled", False)))
+
+    existing_topic = str(existing_conversation.get("topic") or "").strip("/")
+    use_separate_topic_default = bool(existing_topic)
+    use_separate_topic = _prompt_bool("Use a separate ntfy topic for Conversation Mode", use_separate_topic_default)
+
+    topic = ""
+    if use_separate_topic:
+        suggested_topic = existing_topic or f"{existing_ntfy_topic}-conversation"
+        print()
+        print("Create this topic in ntfy and grant your Conversation Mode credential read-write access to it.")
+        print("Anonymous read and anonymous write must stay denied.")
+        topic = _prompt("Conversation Mode topic", suggested_topic).strip().strip("/")
+        if not topic:
+            raise ValueError("Conversation Mode topic must not be blank when using a separate topic")
+    else:
+        print()
+        print(f"Conversation Mode will use the normal ntfy topic: {existing_ntfy_topic}")
+
+    print()
+    print("Conversation Mode credentials")
+    print("The credential used here must have read and write access to the Conversation Mode topic.")
+    print("A normal Start9 Provision Publisher token is write-only and will not work.")
+
+    existing_conversation_auth = existing_conversation.get("auth") or {"type": "same_as_ntfy"}
+    existing_conversation_auth_type = str(existing_conversation_auth.get("type", "same_as_ntfy"))
+
+    can_reuse_ntfy_auth = existing_ntfy_auth_type in {"token", "basic"}
+    auth: dict[str, object]
+
+    if can_reuse_ntfy_auth:
+        print()
+        print(f"Existing ntfy auth type in config: {existing_ntfy_auth_type}")
+        print("You may reuse this credential if, and only if, it has read-write access to the Conversation Mode topic.")
+        reuse_default = existing_conversation_auth_type == "same_as_ntfy"
+        if _prompt_bool("Reuse the existing ntfy credential for Conversation Mode", reuse_default):
+            auth = {"type": "same_as_ntfy"}
+        else:
+            auth = _prompt_conversation_auth(passphrase, existing_conversation_auth)
+    else:
+        print()
+        print("The existing ntfy config does not contain token/basic credentials that Conversation Mode can reuse.")
+        auth = _prompt_conversation_auth(passphrase, existing_conversation_auth)
+
     command_prefix = _prompt("Command prefix", str(existing_conversation.get("command_prefix", "wwg")))
 
     return {
         "enabled": enabled,
+        "topic": topic,
+        "auth": auth,
         "command_prefix": command_prefix,
         "require_protected_topic": True,
         "probe_anonymous_write": _prompt_bool(
@@ -465,6 +530,55 @@ def _prompt_conversation_config(existing_conversation: dict | None = None) -> di
             "Maximum ntfy response characters",
             str(existing_conversation.get("max_response_chars", 3900)),
         )),
+    }
+
+
+def _prompt_conversation_auth(passphrase: str, existing_auth: dict | None = None) -> dict[str, object]:
+    existing_auth = existing_auth or {}
+    existing_auth_type = str(existing_auth.get("type", "token"))
+    if existing_auth_type not in ["token", "basic"]:
+        existing_auth_type = "token"
+
+    print()
+    print("Choose Conversation Mode authentication mode:")
+    print("  token - ntfy access token / bearer token; recommended")
+    print("  basic - username and password")
+    auth_type = _prompt("Conversation Mode auth mode: token/basic", existing_auth_type).lower()
+
+    if auth_type not in ["token", "basic"]:
+        raise ValueError("Conversation Mode auth mode must be one of: token, basic")
+
+    if auth_type == "token":
+        print()
+        print("Enter a ntfy access token with read-write access to the Conversation Mode topic.")
+        print("This will be encrypted in config.yaml using the Wallet Watchguard passphrase.")
+        token = _prompt_secret("Conversation Mode ntfy access token")
+        if not token:
+            raise ValueError("Conversation Mode ntfy token must not be blank")
+        encrypted_token, token_encryption = _encrypted_config_value(token, passphrase)
+        return {
+            "type": "token",
+            "encrypted_token": encrypted_token,
+            "token_encryption": token_encryption,
+        }
+
+    print()
+    print("Enter ntfy username/password credentials with read-write access to the Conversation Mode topic.")
+    print("Both values will be encrypted in config.yaml using the Wallet Watchguard passphrase.")
+    username = _prompt_secret("Conversation Mode ntfy username")
+    password = _prompt_secret("Conversation Mode ntfy password")
+    if not username:
+        raise ValueError("Conversation Mode ntfy username must not be blank")
+    if not password:
+        raise ValueError("Conversation Mode ntfy password must not be blank")
+    encrypted_username, username_encryption = _encrypted_config_value(username, passphrase)
+    encrypted_password, password_encryption = _encrypted_config_value(password, passphrase)
+    return {
+        "type": "basic",
+        "encrypted_username": encrypted_username,
+        "username_encryption": username_encryption,
+        "encrypted_password": encrypted_password,
+        "password_encryption": password_encryption,
     }
 
 
@@ -511,7 +625,7 @@ def _apply_full_setup(config: dict, args: argparse.Namespace, *, existing_secret
     config["electrum"] = _prompt_electrum_config(config.get("electrum"))
     config["ntfy"] = _prompt_ntfy_config(passphrase, config.get("ntfy"))
     config["mempool"] = _prompt_mempool_config(config.get("mempool"))
-    config["conversation"] = _prompt_conversation_config(config.get("conversation"))
+    config["conversation"] = _prompt_conversation_config(passphrase, config.get("conversation"), config.get("ntfy"))
     config["wallets"] = [_prompt_wallet_config(passphrase)]
     return config
 
@@ -533,7 +647,8 @@ def _apply_section(config: dict, section: str, args: argparse.Namespace) -> dict
         return config
 
     if section == "conversation":
-        config["conversation"] = _prompt_conversation_config(config.get("conversation"))
+        passphrase = _get_encryption_passphrase(args, existing_secret=_config_has_encrypted_values(config))
+        config["conversation"] = _prompt_conversation_config(passphrase, config.get("conversation"), config.get("ntfy"))
         return config
 
     if section == "ntfy":
@@ -570,7 +685,7 @@ def _choose_section_to_add() -> str:
     return _prompt_choice(
         "What would you like to configure?",
         {
-            "1": "ntfy credentials/server/topic",
+            "1": "Ntfy credentials/server/topic",
             "2": "Electrum/Fulcrum node",
             "3": "Add wallet xpub",
             "4": "Application settings",
@@ -988,13 +1103,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_init = sub.add_parser("init", help="Run interactive setup/update wizard")
-    p_init.add_argument("--config", default="config.yaml")
+    p_init.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     p_init.add_argument("--reset", action="store_true", help="Replace the existing config with a new one")
     p_init.add_argument(
         "--add",
         choices=INIT_SECTIONS,
         default=None,
-        help="Jump directly to a setup section: full, electrum, ntfy, wallet, app, mempool, or conversation",
+        help="Jump directly to a setup section: full, Electrum, Ntfy, wallet, app, mempool, or Conversation Mode",
     )
     p_init.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt")
     p_init.set_defaults(func=cmd_init)
@@ -1005,17 +1120,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_enc.set_defaults(func=cmd_encrypt_xpub)
 
     p_run = sub.add_parser("run", help="Run Wallet Watchguard daemon")
-    p_run.add_argument("--config", default="config.yaml")
+    p_run.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     p_run.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt/env")
     p_run.add_argument(
         "--conversation",
         action="store_true",
-        help="Enable ntfy conversation Mode for this run, subject to topic protection checks",
+        help="Enable ntfy Conversation Mode for this run, subject to topic protection checks",
     )
     p_run.set_defaults(func=cmd_run)
 
     p_test = sub.add_parser("test-ntfy", help="Send a test ntfy notification using the configured credentials")
-    p_test.add_argument("--config", default="config.yaml")
+    p_test.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     p_test.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt/env")
     p_test.set_defaults(func=cmd_test_ntfy)
 
@@ -1024,7 +1139,7 @@ def build_parser() -> argparse.ArgumentParser:
         aliases=["list-addresses"],
         help="List derived wallet addresses and Electrum/Fulcrum balances",
     )
-    p_addr.add_argument("--config", default="config.yaml")
+    p_addr.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     p_addr.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt/env")
     p_addr.add_argument("--wallet", default=None, help="Only show one wallet by exact name or unique partial name")
     p_addr.add_argument("--wallet-index", type=int, default=None, help="Only show one wallet by its 1-based index in config")

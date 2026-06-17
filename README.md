@@ -1,5 +1,7 @@
 # Bitcoin Wallet Watchguard
 
+**Say hello to a watch only Bitcoin wallet you can talk to.**
+
 Bitcoin Wallet Watchguard allows you to get notified of any transaction to or from your wallets by using the xpub. It then lets you talk to your wallet if you enable Conversation Mode, so you can query all your addresses, transactions, and more from your phone.
 
 All of this is made possible by [ntfy](https://github.com/binwiederhier/ntfy), an open source self-hostable project supported by both Umbrel and Start9. Therefore, Wallet Watchguard does all of this while maintaining sovereignty and privacy so long as you configure it to use your own node and host ntfy yourself.
@@ -15,7 +17,7 @@ wwg init --config config.yaml
 wwg run --config config.yaml
 ```
 
-Docker Compose:
+### Docker Compose
 
 ```bash
 mkdir -p data

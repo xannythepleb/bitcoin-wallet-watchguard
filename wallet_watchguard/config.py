@@ -146,6 +146,29 @@ def validate_config(config: dict[str, Any]) -> None:
         _validate_boolish(conversation, "enabled", "conversation")
         _validate_boolish(conversation, "require_protected_topic", "conversation")
         _validate_boolish(conversation, "probe_anonymous_write", "conversation")
+        _validate_boolish(conversation, "tls_verify", "conversation")
+
+        conversation_auth = conversation.get("auth") or {"type": "same_as_ntfy"}
+        if not isinstance(conversation_auth, dict):
+            raise ConfigError("conversation.auth must be an object")
+
+        conversation_auth_type = conversation_auth.get("type", "same_as_ntfy")
+        if conversation_auth_type not in ["same_as_ntfy", "token", "basic"]:
+            raise ConfigError(f"Unsupported conversation auth type: {conversation_auth_type}")
+
+        if conversation_auth_type == "token":
+            for key in ["encrypted_token", "token_encryption"]:
+                if key not in conversation_auth:
+                    raise ConfigError(f"conversation token auth is missing required field: {key}")
+            _validate_encryption_metadata(conversation_auth["token_encryption"], "Conversation Mode ntfy token")
+
+        if conversation_auth_type == "basic":
+            for key in ["encrypted_username", "username_encryption", "encrypted_password", "password_encryption"]:
+                if key not in conversation_auth:
+                    raise ConfigError(f"conversation basic auth is missing required field: {key}")
+            _validate_encryption_metadata(conversation_auth["username_encryption"], "Conversation Mode ntfy username")
+            _validate_encryption_metadata(conversation_auth["password_encryption"], "Conversation Mode ntfy password")
+
         if int(conversation.get("max_addresses_per_response", 10)) < 1:
             raise ConfigError("conversation.max_addresses_per_response must be at least 1")
         if int(conversation.get("max_response_chars", 3900)) < 500:
@@ -209,6 +232,10 @@ def default_config() -> dict[str, Any]:
             },
             "conversation": {
                 "enabled": False,
+                "topic": "",
+                "auth": {
+                    "type": "same_as_ntfy",
+                },
                 "command_prefix": "wwg",
                 "require_protected_topic": True,
                 "probe_anonymous_write": True,

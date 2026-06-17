@@ -12,7 +12,7 @@ from .derivation import derive_addresses
 from .electrum import ElectrumClient
 from .mempool import MempoolClient, mempool_fee_rate, mempool_tx_status
 from .models import WalletEvent
-from .ntfy import NtfyNotifier, decrypt_ntfy_config
+from .ntfy import NtfyNotifier, decrypt_conversation_ntfy_config, decrypt_ntfy_config
 
 
 class Watcher:
@@ -32,6 +32,8 @@ class Watcher:
         )
         self.decrypted_ntfy_config = decrypt_ntfy_config(config["ntfy"], passphrase)
         self.notifier = NtfyNotifier(self.decrypted_ntfy_config)
+        self.decrypted_conversation_ntfy_config = decrypt_conversation_ntfy_config(config, passphrase)
+        self.conversation_notifier = NtfyNotifier(self.decrypted_conversation_ntfy_config)
         self.mempool = MempoolClient(config.get("mempool") or {})
         self._subscriptions_ready = asyncio.Event()
         self._subscription_count = 0
@@ -52,7 +54,7 @@ class Watcher:
                     config=self.config,
                     passphrase=self.passphrase,
                     electrum_client=self.client,
-                    notifier=self.notifier,
+                    notifier=self.conversation_notifier,
                 )
                 try:
                     await bridge.validate_or_raise()
@@ -153,9 +155,11 @@ class Watcher:
         )
         conversation = self.config.get("conversation") or {}
         requested = bool(conversation.get("enabled", False))
+        conversation_topic = self.decrypted_conversation_ntfy_config.get("topic", ntfy["topic"])
         print(
             "Conversation Mode: "
-            + ("running" if self._conversation_started else ("requested but disabled" if requested else "off")),
+            + ("running" if self._conversation_started else ("requested but disabled" if requested else "off"))
+            + (f" on {self.decrypted_ntfy_config['server'].rstrip('/')}/{conversation_topic}" if requested else ""),
             flush=True,
         )
         print(f"Subscribed scripts: {self._subscription_count}", flush=True)

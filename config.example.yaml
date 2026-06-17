@@ -77,9 +77,20 @@ mempool:
 #   - anonymous read is denied
 #   - anonymous write is denied
 #
+# Leave topic blank to reuse ntfy.topic. Set a topic to keep Conversation Mode
+# commands and replies separate from normal wallet alerts.
+#
+# auth.type values:
+#   same_as_ntfy - reuse ntfy.auth; only safe if that credential has read-write access
+#   token        - store a separate encrypted access token for Conversation Mode
+#   basic        - store separate encrypted username/password credentials
+#
 # HIGHLY recommend ONLY using this with your own node and self-hosted Ntfy instance.
 conversation:
   enabled: false
+  topic: ""
+  auth:
+    type: "same_as_ntfy"
   command_prefix: "wwg"
   require_protected_topic: true
   probe_anonymous_write: true

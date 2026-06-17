@@ -159,7 +159,7 @@ class NtfyNotifier:
             try:
                 response = await client.post(
                     self.topic_url,
-                    content=b"Wallet Watchguard conversation-mode authenticated write probe.",
+                    content=b"Wallet Watchguard Conversation Mode authenticated write probe.",
                     headers={
                         **auth_headers,
                         "Title": "Wallet Watchguard security probe",
@@ -223,8 +223,8 @@ class NtfyNotifier:
         )
 
 
-def decrypt_ntfy_config(ntfy_config: dict[str, Any], passphrase: str) -> dict[str, Any]:
-    auth = dict(ntfy_config.get("auth") or {"type": "none"})
+def _decrypt_auth(auth: dict[str, Any], passphrase: str, *, label_prefix: str) -> dict[str, Any]:
+    auth = dict(auth or {"type": "none"})
     auth_type = auth.get("type", "none")
     decrypted_auth: dict[str, Any] = {"type": auth_type}
 
@@ -233,32 +233,68 @@ def decrypt_ntfy_config(ntfy_config: dict[str, Any], passphrase: str) -> dict[st
             encrypted_value_b64=auth["encrypted_token"],
             passphrase=passphrase,
             metadata=metadata_from_config(auth["token_encryption"]),
-            secret_name="ntfy token",
+            secret_name=f"{label_prefix} token",
         )
     elif auth_type == "basic":
         decrypted_auth["username"] = decrypt_string_with_passphrase(
             encrypted_value_b64=auth["encrypted_username"],
             passphrase=passphrase,
             metadata=metadata_from_config(auth["username_encryption"]),
-            secret_name="ntfy username",
+            secret_name=f"{label_prefix} username",
         )
         decrypted_auth["password"] = decrypt_string_with_passphrase(
             encrypted_value_b64=auth["encrypted_password"],
             passphrase=passphrase,
             metadata=metadata_from_config(auth["password_encryption"]),
-            secret_name="ntfy password",
+            secret_name=f"{label_prefix} password",
         )
     elif auth_type == "none":
         pass
     else:
-        raise ValueError(f"Unsupported ntfy auth type: {auth_type}")
+        raise ValueError(f"Unsupported {label_prefix} auth type: {auth_type}")
 
+    return decrypted_auth
+
+
+def decrypt_ntfy_config(ntfy_config: dict[str, Any], passphrase: str) -> dict[str, Any]:
     return {
         "server": ntfy_config["server"],
         "topic": ntfy_config["topic"],
-        "auth": decrypted_auth,
+        "auth": _decrypt_auth(ntfy_config.get("auth") or {"type": "none"}, passphrase, label_prefix="ntfy"),
         "priority": ntfy_config.get("priority", "default"),
         "tags": ntfy_config.get("tags", "bitcoin"),
         "tls_verify": bool(ntfy_config.get("tls_verify", True)),
         "timeout_seconds": int(ntfy_config.get("timeout_seconds", 15)),
+    }
+
+
+def decrypt_conversation_ntfy_config(config: dict[str, Any], passphrase: str) -> dict[str, Any]:
+    """
+    Build the ntfy config used by Conversation Mode.
+
+    By default Conversation Mode reuses the main ntfy topic and credentials. Users
+    can optionally configure a separate topic and/or separate token/basic auth so
+    normal alert traffic and remote wallet queries stay tidy.
+    """
+    ntfy_config = config["ntfy"]
+    conversation = config.get("conversation") or {}
+    conversation_topic = str(conversation.get("topic") or "").strip("/")
+    topic = conversation_topic or ntfy_config["topic"]
+
+    conversation_auth = conversation.get("auth") or {"type": "same_as_ntfy"}
+    conversation_auth_type = conversation_auth.get("type", "same_as_ntfy")
+
+    if conversation_auth_type == "same_as_ntfy":
+        decrypted_auth = _decrypt_auth(ntfy_config.get("auth") or {"type": "none"}, passphrase, label_prefix="ntfy")
+    else:
+        decrypted_auth = _decrypt_auth(conversation_auth, passphrase, label_prefix="Conversation Mode ntfy")
+
+    return {
+        "server": ntfy_config["server"],
+        "topic": topic,
+        "auth": decrypted_auth,
+        "priority": conversation.get("priority", ntfy_config.get("priority", "default")),
+        "tags": conversation.get("tags", ntfy_config.get("tags", "bitcoin")),
+        "tls_verify": bool(conversation.get("tls_verify", ntfy_config.get("tls_verify", True))),
+        "timeout_seconds": int(conversation.get("timeout_seconds", ntfy_config.get("timeout_seconds", 15))),
     }
