@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+watchguard.sqlite3
+/data/
+config.yaml
+.env
+wwg-derive
+target/

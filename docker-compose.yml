@@ -1,0 +1,12 @@
+services:
+  wallet-watchguard:
+    build: .
+    container_name: wallet-watchguard
+    restart: unless-stopped
+    environment:
+      # Needed only for `wwg run`, not for `wwg init`.
+      # Do not commit this. Prefer a local .env file outside git.
+      WWG_PASSPHRASE: ${WWG_PASSPHRASE:-}
+    volumes:
+      - ./data:/data
+    command: ["wwg", "run", "--config", "/data/config.yaml"]

@@ -1,0 +1,44 @@
+app:
+  name: "Bitcoin Wallet Watchguard"
+  database_path: "/data/watchguard.sqlite3"
+  derivation_helper_path: "/app/wwg-derive"
+  lookahead: 100
+  notify_on_mempool: true
+  notify_on_confirmed: true
+
+# Strongly recommended: use your own Bitcoin node + Fulcrum.
+electrum:
+  host: "fulcrum.local"
+  port: 50002
+  tls: true
+  # For onion hosts, either run the whole container through Tor/network routing,
+  # or set socks_proxy, e.g. "127.0.0.1:9050".
+  socks_proxy: null
+  timeout_seconds: 30
+
+# Strongly recommended: use a self-hosted ntfy instance and a random private topic.
+ntfy:
+  server: "https://ntfy.example.com"
+  topic: "wallet-watchguard-c3f7b6e63b11405fb911"
+  token: null
+  username: null
+  password: null
+  priority: "high"
+  tags: "bitcoin,watch"
+
+wallets:
+  - name: "Main Taproot wallet"
+    network: "bitcoin"
+    wallet_type: "taproot"
+    account_path: "m/86'/0'/0'"
+    xpub_encryption:
+      scheme: "pynacl-secretbox-argon2id-v1"
+      kdf: "argon2id"
+      opslimit: 3
+      memlimit: 268435456
+      salt: "REPLACE_WITH_BASE64_SALT"
+    encrypted_xpub: "REPLACE_WITH_SECRETBOX_CIPHERTEXT"
+    # Relative to the supplied account xpub. These must be non-hardened.
+    receive_path_template: "0/*"
+    change_path_template: "1/*"
+    lookahead: 100
