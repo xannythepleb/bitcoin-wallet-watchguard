@@ -72,6 +72,24 @@ mempool:
   timeout_seconds: 15
   enrich_notifications: true
 
+# Optional: Conversation Mode (remote control) via Ntfy.
+#
+# This is OFF by default. If enabled, Wallet Watchguard will only start
+# conversation mode if the ntfy topic passes runtime protection checks:
+#   - configured token/basic credentials can read the topic
+#   - configured token/basic credentials can publish to the topic
+#   - anonymous read is denied
+#   - anonymous write is denied
+#
+# HIGHLY recommend ONLY using this with your own node and self-hosted Ntfy instance.
+conversation:
+  enabled: false
+  command_prefix: "wwg"
+  require_protected_topic: true
+  probe_anonymous_write: true
+  max_addresses_per_response: 10
+  max_response_chars: 3900
+
 # Wallet entries are intentionally not shown as fake encrypted blobs here.
 #
 # Add an encrypted wallet with:

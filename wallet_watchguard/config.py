@@ -141,6 +141,16 @@ def validate_config(config: dict[str, Any]) -> None:
         if mempool.get("enabled") and not mempool.get("base_url"):
             raise ConfigError("mempool.enabled is true but mempool.base_url is blank")
 
+    conversation = config.get("conversation") or {}
+    if conversation:
+        _validate_boolish(conversation, "enabled", "conversation")
+        _validate_boolish(conversation, "require_protected_topic", "conversation")
+        _validate_boolish(conversation, "probe_anonymous_write", "conversation")
+        if int(conversation.get("max_addresses_per_response", 10)) < 1:
+            raise ConfigError("conversation.max_addresses_per_response must be at least 1")
+        if int(conversation.get("max_response_chars", 3900)) < 500:
+            raise ConfigError("conversation.max_response_chars must be at least 500")
+
     if not isinstance(config["wallets"], list) or not config["wallets"]:
         raise ConfigError("Config must contain at least one wallet")
 
@@ -196,6 +206,14 @@ def default_config() -> dict[str, Any]:
                 "tls_verify": True,
                 "timeout_seconds": 15,
                 "enrich_notifications": True,
+            },
+            "conversation": {
+                "enabled": False,
+                "command_prefix": "wwg",
+                "require_protected_topic": True,
+                "probe_anonymous_write": True,
+                "max_addresses_per_response": 10,
+                "max_response_chars": 3900,
             },
             "wallets": [],
         }

@@ -26,7 +26,7 @@ from .ntfy import NtfyNotifier, decrypt_ntfy_config
 from .watcher import Watcher, get_passphrase_from_env_or_prompt
 
 
-INIT_SECTIONS = ["full", "electrum", "ntfy", "wallet", "app", "mempool"]
+INIT_SECTIONS = ["full", "electrum", "ntfy", "wallet", "app", "mempool", "conversation"]
 
 
 def _prompt(label: str, default: str | None = None) -> str:
@@ -416,6 +416,46 @@ def _prompt_mempool_config(existing_mempool: dict | None = None) -> dict[str, ob
     }
 
 
+def _prompt_conversation_config(existing_conversation: dict | None = None) -> dict[str, object]:
+    existing_conversation = existing_conversation or {}
+
+    print()
+    print("Conversation Mode")
+    print("Conversation Mode lets you query Wallet Watchguard remotely via ntfy.")
+    print("It is OFF by default and will only start if the ntfy topic passes protection checks:")
+    print("  - Wallet Watchguard can read the topic with configured credentials")
+    print("  - Wallet Watchguard can publish with configured credentials")
+    print("  - anonymous read is blocked")
+    print("  - anonymous write is blocked")
+    print()
+    print("Use only with a private, password/token-protected ntfy topic.")
+    print()
+    print("Everything is read only. No one can spend your Bitcoin through this.")
+    print("But if you want your transactions to remain private,")
+    print("I HIGHLY recommend using your own node and ntfy instance.")
+
+    enabled = _prompt_bool("Enable Conversation Mode in config", bool(existing_conversation.get("enabled", False)))
+    command_prefix = _prompt("Command prefix", str(existing_conversation.get("command_prefix", "wwg")))
+
+    return {
+        "enabled": enabled,
+        "command_prefix": command_prefix,
+        "require_protected_topic": True,
+        "probe_anonymous_write": _prompt_bool(
+            "Probe anonymous write access on startup",
+            bool(existing_conversation.get("probe_anonymous_write", True)),
+        ),
+        "max_addresses_per_response": int(_prompt(
+            "Maximum addresses per ntfy response",
+            str(existing_conversation.get("max_addresses_per_response", 10)),
+        )),
+        "max_response_chars": int(_prompt(
+            "Maximum ntfy response characters",
+            str(existing_conversation.get("max_response_chars", 3900)),
+        )),
+    }
+
+
 def _prompt_wallet_config(passphrase: str) -> dict[str, object]:
     print()
     print("Wallet configuration")
@@ -459,6 +499,7 @@ def _apply_full_setup(config: dict, args: argparse.Namespace, *, existing_secret
     config["electrum"] = _prompt_electrum_config(config.get("electrum"))
     config["ntfy"] = _prompt_ntfy_config(passphrase, config.get("ntfy"))
     config["mempool"] = _prompt_mempool_config(config.get("mempool"))
+    config["conversation"] = _prompt_conversation_config(config.get("conversation"))
     config["wallets"] = [_prompt_wallet_config(passphrase)]
     return config
 
@@ -477,6 +518,10 @@ def _apply_section(config: dict, section: str, args: argparse.Namespace) -> dict
 
     if section == "mempool":
         config["mempool"] = _prompt_mempool_config(config.get("mempool"))
+        return config
+
+    if section == "conversation":
+        config["conversation"] = _prompt_conversation_config(config.get("conversation"))
         return config
 
     if section == "ntfy":
@@ -518,8 +563,9 @@ def _choose_section_to_add() -> str:
             "3": "Add wallet xpub",
             "4": "Application settings",
             "5": "Optional Mempool API enrichment",
-            "6": "Full setup wizard",
-            "7": "Cancel",
+            "6": "Conversation Mode",
+            "7": "Full setup wizard",
+            "8": "Cancel",
         },
         default="1",
     )
@@ -532,8 +578,9 @@ def _section_from_menu_choice(choice: str) -> str | None:
         "3": "wallet",
         "4": "app",
         "5": "mempool",
-        "6": "full",
-        "7": None,
+        "6": "conversation",
+        "7": "full",
+        "8": None,
     }[choice]
 
 
@@ -901,6 +948,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 2
 
     config = load_config(config_path)
+    if args.conversation:
+        config.setdefault("conversation", {})["enabled"] = True
     passphrase = args.passphrase or get_passphrase_from_env_or_prompt()
     watcher = Watcher(config, passphrase, config_path=config_path)
     asyncio.run(watcher.run())
@@ -933,7 +982,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--add",
         choices=INIT_SECTIONS,
         default=None,
-        help="Jump directly to a setup section: full, electrum, ntfy, wallet, app, or mempool",
+        help="Jump directly to a setup section: full, electrum, ntfy, wallet, app, mempool, or conversation",
     )
     p_init.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt")
     p_init.set_defaults(func=cmd_init)
@@ -946,6 +995,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_run = sub.add_parser("run", help="Run Wallet Watchguard daemon")
     p_run.add_argument("--config", default="config.yaml")
     p_run.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt/env")
+    p_run.add_argument(
+        "--conversation",
+        action="store_true",
+        help="Enable ntfy Conversation Mode for this run, subject to topic protection checks",
+    )
     p_run.set_defaults(func=cmd_run)
 
     p_test = sub.add_parser("test-ntfy", help="Send a test ntfy notification using the configured credentials")

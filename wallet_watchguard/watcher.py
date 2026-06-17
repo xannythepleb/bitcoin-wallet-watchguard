@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from .conversation import ConversationBridge, ConversationModeError
 from .crypto import decrypt_xpub_with_passphrase, metadata_from_config, prompt_existing_passphrase
 from .db import Database
 from .derivation import derive_addresses
@@ -29,23 +30,51 @@ class Watcher:
             socks_proxy=electrum.get("socks_proxy"),
             timeout_seconds=int(electrum.get("timeout_seconds", 30)),
         )
-        self.notifier = NtfyNotifier(decrypt_ntfy_config(config["ntfy"], passphrase))
+        self.decrypted_ntfy_config = decrypt_ntfy_config(config["ntfy"], passphrase)
+        self.notifier = NtfyNotifier(self.decrypted_ntfy_config)
         self.mempool = MempoolClient(config.get("mempool") or {})
         self._subscriptions_ready = asyncio.Event()
         self._subscription_count = 0
+        self._conversation_started = False
 
     async def run(self) -> None:
         await self.db.connect()
         await self.client.connect()
 
         listener = asyncio.create_task(self.client.listen(self._handle_notification))
+        conversation_task: asyncio.Task | None = None
         try:
             await self._derive_store_and_subscribe()
             self._subscriptions_ready.set()
+
+            if bool((self.config.get("conversation") or {}).get("enabled", False)):
+                bridge = ConversationBridge(
+                    config=self.config,
+                    passphrase=self.passphrase,
+                    electrum_client=self.client,
+                    notifier=self.notifier,
+                )
+                try:
+                    await bridge.validate_or_raise()
+                    conversation_task = asyncio.create_task(bridge.run())
+                    self._conversation_started = True
+                except ConversationModeError as exc:
+                    self._conversation_started = False
+                    print("", flush=True)
+                    print(str(exc), flush=True)
+                    print("Wallet Watchguard will continue monitoring wallets, but Conversation Mode is disabled.", flush=True)
+
             self._print_startup_summary()
             await asyncio.Event().wait()
         finally:
+            if conversation_task is not None:
+                conversation_task.cancel()
             listener.cancel()
+            if conversation_task is not None:
+                try:
+                    await conversation_task
+                except asyncio.CancelledError:
+                    pass
             await self.client.close()
             await self.db.close()
 
@@ -122,6 +151,13 @@ class Watcher:
             + (f" ({mempool.get('base_url')})" if mempool.get("enabled") else ""),
             flush=True,
         )
+        conversation = self.config.get("conversation") or {}
+        requested = bool(conversation.get("enabled", False))
+        print(
+            "Conversation Mode: "
+            + ("running" if self._conversation_started else ("requested but disabled" if requested else "off")),
+            flush=True,
+        )
         print(f"Subscribed scripts: {self._subscription_count}", flush=True)
         print("", flush=True)
         print("Wallets:", flush=True)
@@ -138,6 +174,8 @@ class Watcher:
         print(f"  wwg addresses --config {self.config_path} --limit 20", flush=True)
         print(f'  wwg addresses --config {self.config_path} --wallet "<wallet name>" --limit 20', flush=True)
         print(f"  wwg addresses --config {self.config_path} --all --include-change --limit 20", flush=True)
+        if bool((self.config.get("conversation") or {}).get("enabled", False)):
+            print("  ntfy conversation: send 'wwg help' to the protected topic", flush=True)
         print("", flush=True)
 
     async def _handle_notification(self, message: dict[str, Any]) -> None:

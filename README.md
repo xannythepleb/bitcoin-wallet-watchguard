@@ -1,8 +1,10 @@
 # Bitcoin Wallet Watchguard
 
-Bitcoin Wallet Watchguard watches xpub-derived wallet addresses through your own Electrum/Fulcrum server and sends notifications through ntfy.
+Bitcoin Wallet Watchguard allows you to get notified of any transaction to or from your wallets by using the xpub. It then lets you talk to your wallet if you enable Conversation Mode, so you can query all your addresses, transactions, and more from your phone.
 
-The project is intentionally CLI-first for now. A GUI/setup wizard can sit on top later.
+All of this is made possible by [ntfy](https://github.com/binwiederhier/ntfy), an open source self-hostable project supported by both Umbrel and Start9. Therefore, Wallet Watchguard does all of this while maintaining sovereignty and privacy so long as you configure it to use your own node and host ntfy yourself.
+
+Your xpub is only ever stored locally on the machine you install Wallet Watchguard on. It is encrypted at rest using libsodium and Argon2id.
 
 ## First-time setup
 
@@ -145,6 +147,54 @@ wwg addresses --config /data/config.yaml --only-used --include-change --limit 10
 ```
 
 The address table includes a `used`/`unused` status column. Unused receive addresses are shown by default, even when their balance is zero.
+
+## Conversation Mode: Talk to your wallet anywhere
+
+Conversation Mode lets you query Wallet Watchguard remotely through ntfy. You can keep an eye on even your hardware cold storage wherever you are via 100% self-hosted infrastructure. No third party middleman if you configure it correctly with your own node and your own ntfy instance. You can run both of these on your own physical hardware using Start9 or Umbrel for true sovereignty.
+
+I specifically added this feature because I had a hard time finding a reliable watch only wallet that could work with any hardware wallet and allowed you to use your own node on the backend. So I made one. And because ntfy runs on Android, iOS, and in the browser, it is truly universal.
+
+It is off by default and checks are in place to ensure it is only enabled on secure sessions (password protected, no public read/write access).
+
+Enable it in config:
+
+```bash
+wwg init --config /data/config.yaml --add conversation
+```
+
+Or enable it for a single daemon run:
+
+```bash
+WWG_PASSPHRASE='your passphrase here' docker compose run --rm wallet-watchguard \
+  wwg run --config /data/config.yaml --conversation
+```
+
+Conversation mode will only start if the configured ntfy topic passes runtime protection checks:
+
+```text
+configured token/basic credentials can read the topic
+configured token/basic credentials can publish to the topic
+anonymous read is denied
+anonymous write is denied
+```
+
+If the topic is public, or anonymous read/write is allowed, Wallet Watchguard will continue normal wallet monitoring but will not honour conversation mode.
+
+Example ntfy commands:
+
+```text
+wwg help
+wwg wallets
+wwg next address
+wwg next 3
+wwg addresses --wallet-index 1 --limit 5
+wwg addresses --wallet "Main Taproot wallet" --include-change --only-used
+wwg balance
+```
+
+The default command prefix is `wwg`. The prefix avoids accidental replies to unrelated messages on the same topic.
+
+Conversation mode performs an anonymous write probe on startup because ntfy's normal client APIs can publish, subscribe and authenticate, but do not expose a harmless per-topic ACL inspection endpoint for ordinary clients. The probe uses `Cache: no`, `Firebase: no` and minimum priority. If that anonymous probe succeeds, conversation mode is refused.
 
 ## Optional Mempool API enrichment
 

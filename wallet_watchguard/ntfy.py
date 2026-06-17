@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -7,61 +10,222 @@ import httpx
 from .crypto import decrypt_string_with_passphrase, metadata_from_config
 
 
+@dataclass(frozen=True)
+class NtfyProtectionCheck:
+    authenticated_read_ok: bool
+    authenticated_write_ok: bool
+    anonymous_read_blocked: bool
+    anonymous_write_blocked: bool
+    details: list[str]
+
+    @property
+    def protected_for_conversation(self) -> bool:
+        return (
+            self.authenticated_read_ok
+            and self.authenticated_write_ok
+            and self.anonymous_read_blocked
+            and self.anonymous_write_blocked
+        )
+
+
 class NtfyNotifier:
     def __init__(self, config: dict[str, Any]) -> None:
         self.server = str(config["server"]).rstrip("/")
-        self.topic = str(config["topic"])
+        self.topic = str(config["topic"]).strip("/")
         self.priority = str(config.get("priority", "default"))
         self.tags = str(config.get("tags", "bitcoin"))
         self.tls_verify = bool(config.get("tls_verify", True))
         self.timeout_seconds = int(config.get("timeout_seconds", 15))
 
         auth = config.get("auth") or {"type": "none"}
-        self.auth_type = auth.get("type", "none")
+        self.auth_type = str(auth.get("type", "none"))
         self.token = auth.get("token")
         self.username = auth.get("username")
         self.password = auth.get("password")
 
-    async def send(self, title: str, message: str, *, priority: str | None = None, tags: str | None = None) -> None:
+    @property
+    def topic_url(self) -> str:
+        return f"{self.server}/{self.topic}"
+
+    def _auth_headers(self) -> dict[str, str]:
+        if self.auth_type == "token":
+            if not self.token:
+                raise ValueError("ntfy auth type is token, but no token was configured")
+            return {"Authorization": f"Bearer {self.token}"}
+        if self.auth_type == "basic":
+            return {}
+        if self.auth_type == "none":
+            return {}
+        raise ValueError(f"Unsupported ntfy auth type: {self.auth_type}")
+
+    def _auth_tuple(self) -> tuple[str, str] | None:
+        if self.auth_type != "basic":
+            return None
+        if not self.username or not self.password:
+            raise ValueError("ntfy auth type is basic, but username/password were not configured")
+        return (str(self.username), str(self.password))
+
+    def _timeout(self, *, streaming: bool = False) -> httpx.Timeout:
+        if streaming:
+            return httpx.Timeout(
+                connect=self.timeout_seconds,
+                read=None,
+                write=self.timeout_seconds,
+                pool=self.timeout_seconds,
+            )
+        return httpx.Timeout(self.timeout_seconds)
+
+    async def send(
+        self,
+        title: str,
+        message: str,
+        *,
+        priority: str | None = None,
+        tags: str | None = None,
+        cache: bool = True,
+        firebase: bool = True,
+    ) -> None:
         headers = {
             "Title": title,
             "Priority": priority or self.priority,
             "Tags": tags or self.tags,
             "Markdown": "yes",
         }
+        headers.update(self._auth_headers())
+        if not cache:
+            headers["Cache"] = "no"
+        if not firebase:
+            headers["Firebase"] = "no"
 
-        auth = None
-
-        if self.auth_type == "token":
-            if not self.token:
-                raise ValueError("ntfy auth type is token, but no token was configured")
-            headers["Authorization"] = f"Bearer {self.token}"
-
-        elif self.auth_type == "basic":
-            if not self.username or not self.password:
-                raise ValueError("ntfy auth type is basic, but username/password were not configured")
-            auth = (self.username, self.password)
-
-        elif self.auth_type == "none":
-            pass
-
-        else:
-            raise ValueError(f"Unsupported ntfy auth type: {self.auth_type}")
-
-        async with httpx.AsyncClient(timeout=self.timeout_seconds, verify=self.tls_verify) as client:
+        async with httpx.AsyncClient(timeout=self._timeout(), verify=self.tls_verify) as client:
             response = await client.post(
-                f"{self.server}/{self.topic}",
+                self.topic_url,
                 content=message.encode("utf-8"),
                 headers=headers,
-                auth=auth,
+                auth=self._auth_tuple(),
             )
             response.raise_for_status()
+
+    async def subscribe_json(self, *, since: str | int = "latest") -> AsyncIterator[dict[str, Any]]:
+        headers = self._auth_headers()
+        async with httpx.AsyncClient(timeout=self._timeout(streaming=True), verify=self.tls_verify) as client:
+            async with client.stream(
+                "GET",
+                f"{self.topic_url}/json",
+                params={"since": str(since)},
+                headers=headers,
+                auth=self._auth_tuple(),
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+                    try:
+                        yield json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+    async def check_conversation_security(self, *, probe_anonymous_write: bool = True) -> NtfyProtectionCheck:
+        details: list[str] = []
+        if self.auth_type not in {"token", "basic"}:
+            return NtfyProtectionCheck(
+                authenticated_read_ok=False,
+                authenticated_write_ok=False,
+                anonymous_read_blocked=False,
+                anonymous_write_blocked=False,
+                details=["ntfy auth type must be token or basic for conversation mode"],
+            )
+
+        auth_headers = self._auth_headers()
+        auth_tuple = self._auth_tuple()
+        authenticated_read_ok = False
+        authenticated_write_ok = False
+        anonymous_read_blocked = False
+        anonymous_write_blocked = False
+
+        async with httpx.AsyncClient(timeout=self._timeout(), verify=self.tls_verify) as client:
+            try:
+                response = await client.get(
+                    f"{self.topic_url}/json",
+                    params={"poll": "1", "since": "latest"},
+                    headers=auth_headers,
+                    auth=auth_tuple,
+                )
+                authenticated_read_ok = response.status_code < 400
+                details.append("authenticated read: ok" if authenticated_read_ok else f"authenticated read: failed HTTP {response.status_code}")
+            except Exception as exc:
+                details.append(f"authenticated read: failed {exc}")
+
+            try:
+                response = await client.post(
+                    self.topic_url,
+                    content=b"Wallet Watchguard conversation-mode authenticated write probe.",
+                    headers={
+                        **auth_headers,
+                        "Title": "Wallet Watchguard security probe",
+                        "Tags": "shield,bitcoin",
+                        "Priority": "min",
+                        "Cache": "no",
+                        "Firebase": "no",
+                    },
+                    auth=auth_tuple,
+                )
+                authenticated_write_ok = response.status_code < 400
+                details.append("authenticated write: ok" if authenticated_write_ok else f"authenticated write: failed HTTP {response.status_code}")
+            except Exception as exc:
+                details.append(f"authenticated write: failed {exc}")
+
+            try:
+                response = await client.get(
+                    f"{self.topic_url}/json",
+                    params={"poll": "1", "since": "latest"},
+                )
+                if response.status_code in {401, 403}:
+                    anonymous_read_blocked = True
+                    details.append(f"anonymous read: blocked HTTP {response.status_code}")
+                else:
+                    details.append(f"anonymous read: allowed or inconclusive HTTP {response.status_code}")
+            except Exception as exc:
+                details.append(f"anonymous read: failed to check {exc}")
+
+            if not probe_anonymous_write:
+                details.append("anonymous write: not probed; refusing conversation mode")
+            else:
+                try:
+                    response = await client.post(
+                        self.topic_url,
+                        content=(
+                            b"Wallet Watchguard anonymous write protection probe. "
+                            b"If this publishes, the topic is not private enough for Conversation Mode."
+                        ),
+                        headers={
+                            "Title": "Wallet Watchguard anonymous write probe",
+                            "Tags": "warning,bitcoin",
+                            "Priority": "min",
+                            "Cache": "no",
+                            "Firebase": "no",
+                        },
+                    )
+                    if response.status_code in {401, 403}:
+                        anonymous_write_blocked = True
+                        details.append(f"anonymous write: blocked HTTP {response.status_code}")
+                    else:
+                        details.append(f"anonymous write: allowed or inconclusive HTTP {response.status_code}")
+                except Exception as exc:
+                    details.append(f"anonymous write: failed to check {exc}")
+
+        return NtfyProtectionCheck(
+            authenticated_read_ok=authenticated_read_ok,
+            authenticated_write_ok=authenticated_write_ok,
+            anonymous_read_blocked=anonymous_read_blocked,
+            anonymous_write_blocked=anonymous_write_blocked,
+            details=details,
+        )
 
 
 def decrypt_ntfy_config(ntfy_config: dict[str, Any], passphrase: str) -> dict[str, Any]:
     auth = dict(ntfy_config.get("auth") or {"type": "none"})
     auth_type = auth.get("type", "none")
-
     decrypted_auth: dict[str, Any] = {"type": auth_type}
 
     if auth_type == "token":
