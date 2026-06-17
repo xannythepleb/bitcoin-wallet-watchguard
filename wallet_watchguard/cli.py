@@ -23,6 +23,7 @@ from .crypto import (
 )
 from .derivation import derive_addresses
 from .electrum import ElectrumClient, default_tls_verify_for_host
+from .mempool import MempoolClient, format_mempool_fee_summary
 from .ntfy import NtfyNotifier, decrypt_ntfy_config
 from .watcher import Watcher, get_passphrase_from_env_or_prompt
 
@@ -685,7 +686,7 @@ def _choose_section_to_add() -> str:
     return _prompt_choice(
         "What would you like to configure?",
         {
-            "1": "Ntfy credentials/server/topic",
+            "1": "ntfy credentials/server/topic",
             "2": "Electrum/Fulcrum node",
             "3": "Add wallet xpub",
             "4": "Application settings",
@@ -973,6 +974,12 @@ async def _cmd_addresses_async(config: dict, passphrase: str, args: argparse.Nam
         await client.close()
 
 
+
+async def _cmd_fees_async(config: dict) -> None:
+    mempool = MempoolClient(config.get("mempool") or {})
+    fees = await mempool.get_recommended_fees()
+    print(format_mempool_fee_summary(fees))
+
 def cmd_init(args: argparse.Namespace) -> int:
     config_path = Path(args.config)
 
@@ -1098,6 +1105,12 @@ def cmd_addresses(args: argparse.Namespace) -> int:
     return 0
 
 
+
+def cmd_fees(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    asyncio.run(_cmd_fees_async(config))
+    return 0
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="wallet-watchguard")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1109,7 +1122,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--add",
         choices=INIT_SECTIONS,
         default=None,
-        help="Jump directly to a setup section: full, Electrum, Ntfy, wallet, app, mempool, or Conversation Mode",
+        help="Jump directly to a setup section: full, electrum, ntfy, wallet, app, mempool, or Conversation Mode",
     )
     p_init.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt")
     p_init.set_defaults(func=cmd_init)
@@ -1150,6 +1163,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_addr.add_argument("--only-used", action="store_true", help="Hide addresses with no Electrum history")
     p_addr.add_argument("--debug", action="store_true", help="Print derivation and Electrum query diagnostics to stderr")
     p_addr.set_defaults(func=cmd_addresses)
+
+    p_fees = sub.add_parser(
+        "fees",
+        aliases=["mempool-fees"],
+        help="Show local Mempool low/medium/high Bitcoin fee recommendations",
+    )
+    p_fees.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_fees.set_defaults(func=cmd_fees)
 
     return parser
 

@@ -8,6 +8,12 @@ All of this is made possible by [ntfy](https://github.com/binwiederhier/ntfy), a
 
 Your xpub is only ever stored locally on the machine you install Wallet Watchguard on. It is encrypted at rest using libsodium and Argon2id.
 
+## Roadmap
+
+The current iteration of this tool is only scratching the surface of its potential. At its core, this lets you use Ntfy to talk to your node from your phone anywhere in the world without any third parties or port forwarding required. It's like a Telegram bot but fully self-hosted.
+
+The existing view only wallet features via command line syntax are useful but I'm already working on more big updates to this because it fills a genuine gap in my own setup. This will get a lot cooler very quickly.
+
 ## First Time Setup
 
 Local:
@@ -22,7 +28,7 @@ wwg run --config config.yaml
 ```bash
 mkdir -p data
 docker compose build
-docker compose run --rm wallet-watchguard wwg init --config /data/config.yaml
+docker compose run --rm wallet-watchguard wwg init
 WWG_PASSPHRASE='your passphrase here' docker compose up -d
 ```
 
@@ -31,12 +37,12 @@ If the config already exists, `wwg init` asks whether to update part of the conf
 You can jump directly to a section:
 
 ```bash
-wwg init --config /data/config.yaml --add ntfy
-wwg init --config /data/config.yaml --add electrum
-wwg init --config /data/config.yaml --add wallet
-wwg init --config /data/config.yaml --add mempool
-wwg init --config /data/config.yaml --add app
-wwg init --config /data/config.yaml --reset
+wwg init --add ntfy
+wwg init --add electrum
+wwg init --add wallet
+wwg init --add mempool
+wwg init --add app
+wwg init --reset
 ```
 
 ### Docker Images
@@ -54,13 +60,13 @@ docker pull ghcr.io/xannythepleb/bitcoin-wallet-watchguard:latest
 After configuring ntfy, send a test notification:
 
 ```bash
-wwg test-ntfy --config /data/config.yaml
+wwg test-ntfy
 ```
 
 With Docker Compose:
 
 ```bash
-WWG_PASSPHRASE='your passphrase here' docker compose run --rm wallet-watchguard wwg test-ntfy --config /data/config.yaml
+WWG_PASSPHRASE='your passphrase here' docker compose run --rm wallet-watchguard wwg test-ntfy
 ```
 
 You can also store your `WWG_PASSPHRASE` in your `.env` for convenience, with obvious security tradeoffs.
@@ -70,7 +76,7 @@ You can also store your `WWG_PASSPHRASE` in your `.env` for convenience, with ob
 If you use Start9/StartOS ntfy, run:
 
 ```bash
-wwg init --config /data/config.yaml --add ntfy
+wwg init --add ntfy
 ```
 
 Choose the Start9/StartOS provision-publisher path.
@@ -107,9 +113,9 @@ StartOS, Umbrel, and other local node systems often use private or self-signed T
 Run the relevant setup section and disable TLS certificate verification for that local service:
 
 ```bash
-wwg init --config /data/config.yaml --add electrum
-wwg init --config /data/config.yaml --add ntfy
-wwg init --config /data/config.yaml --add mempool
+wwg init --add electrum
+wwg init --add ntfy
+wwg init --add mempool
 ```
 
 TLS encryption still remains enabled; only public CA/hostname verification is skipped for that local self-hosted service.
@@ -121,43 +127,43 @@ For existing configs without `electrum.tls_verify`, Wallet Watchguard automatica
 List receive addresses and balances. If more than one wallet is configured, Wallet Watchguard now asks which wallet you want to view:
 
 ```bash
-wwg addresses --config /data/config.yaml --limit 20
+wwg addresses --limit 20
 ```
 
 Show every configured wallet without prompting:
 
 ```bash
-wwg addresses --config /data/config.yaml --all --limit 20
+wwg addresses --all --limit 20
 ```
 
 Limit to one wallet by exact name or unique partial name:
 
 ```bash
-wwg addresses --config /data/config.yaml --wallet "Main Taproot wallet"
+wwg addresses --wallet "Main Taproot wallet"
 ```
 
 Limit to one wallet by its 1-based index in config:
 
 ```bash
-wwg addresses --config /data/config.yaml --wallet-index 2
+wwg addresses --wallet-index 2
 ```
 
 Include change addresses:
 
 ```bash
-wwg addresses --config /data/config.yaml --include-change --limit 20
+wwg addresses --include-change --limit 20
 ```
 
 Only show non-zero addresses:
 
 ```bash
-wwg addresses --config /data/config.yaml --only-nonzero --include-change --limit 100
+wwg addresses --only-nonzero --include-change --limit 100
 ```
 
 Only show addresses that already have Electrum history:
 
 ```bash
-wwg addresses --config /data/config.yaml --only-used --include-change --limit 100
+wwg addresses --only-used --include-change --limit 100
 ```
 
 The address table includes a `used`/`unused` status column. Unused receive addresses are shown by default, even when their balance is zero.
@@ -173,14 +179,14 @@ It is off by default and checks are in place to ensure it is only enabled on sec
 Enable it in config:
 
 ```bash
-wwg init --config /data/config.yaml --add conversation
+wwg init --add conversation
 ```
 
 Or enable it for a single daemon run:
 
 ```bash
 WWG_PASSPHRASE='your passphrase here' docker compose run --rm wallet-watchguard \
-  wwg run --config /data/config.yaml --conversation
+  wwg run --conversation
 ```
 
 Conversation mode will only start if the configured ntfy topic passes runtime protection checks:
@@ -206,6 +212,7 @@ wwg next 3
 wwg addresses --wallet-index 1 --limit 5
 wwg addresses --wallet "Main Taproot wallet" --include-change --only-used
 wwg balance
+wwg fees
 ```
 
 The default command prefix is `wwg`. The prefix avoids accidental replies to unrelated messages on the same topic.
@@ -223,7 +230,7 @@ Use this process instead:
 2. Grant that user read-write access to the Wallet Watchguard topic.
 3. Log into the ntfy web UI as that user.
 4. Create an access token manually in the ntfy web UI.
-5. Run: wwg init --config /data/config.yaml --add ntfy
+5. Run: wwg init --add ntfy
 6. Choose token auth and paste that access token.
 7. Keep anonymous read and anonymous write denied.
 ```
@@ -267,7 +274,7 @@ received/sent/self-transfer classification
 Enable it with:
 
 ```bash
-wwg init --config /data/config.yaml --add mempool
+wwg init --add mempool
 ```
 
 Use a local/self-hosted Mempool API where possible, for example:
@@ -275,7 +282,7 @@ Use a local/self-hosted Mempool API where possible, for example:
 ```yaml
 mempool:
   enabled: true
-  base_url: https://mempool.local/api
+  base_url: https://mempool.local:1234/api
   tls_verify: false
   timeout_seconds: 15
   enrich_notifications: true

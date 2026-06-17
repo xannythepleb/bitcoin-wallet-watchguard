@@ -57,6 +57,9 @@ ntfy:
 # Optional: enrich notifications with decoded transaction details, fee,
 # vsize and fee rate from a local Mempool instance.
 #
+# Also allows you to query your local Mempool instance in Conversation Mode.
+# For example try: wwg fees
+#
 # Fulcrum/Electrum remains the wallet activity source of truth.
 #
 # For Start9/StartOS local Mempool URLs using self-signed TLS certificates,

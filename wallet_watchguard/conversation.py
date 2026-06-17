@@ -11,6 +11,7 @@ from typing import Any
 from .crypto import decrypt_xpub_with_passphrase, metadata_from_config
 from .derivation import derive_addresses
 from .electrum import ElectrumClient
+from .mempool import MempoolClient, format_mempool_fee_summary
 from .models import DerivedAddress
 from .ntfy import NtfyNotifier
 
@@ -110,7 +111,7 @@ class ConversationBridge:
         )
         print(
             "Conversation commands: 'wwg help', 'wwg wallets', "
-            "'wwg next address', 'wwg next 3', 'wwg addresses --wallet-index 1 --limit 5'.",
+            "'wwg next address', 'wwg next 3', 'wwg addresses --wallet-index 1 --limit 5', 'wwg fees'.",
             flush=True,
         )
         async for event in self.notifier.subscribe_json(since=since):
@@ -158,7 +159,7 @@ class ConversationBridge:
                 return "help"
             if lowered.startswith(prefix + " "):
                 return text[len(self.command_prefix) :].strip()
-        natural_starts = ("help", "wallets", "next", "receive", "address", "addresses", "balance", "latest", "unused")
+        natural_starts = ("help", "wallets", "next", "receive", "address", "addresses", "balance", "latest", "unused", "fees", "fee", "mempool fees")
         if lowered.startswith(natural_starts):
             return text
         return None
@@ -174,6 +175,8 @@ class ConversationBridge:
             return await self._handle_addresses_command(command)
         if lowered.startswith("balance"):
             return await self._handle_addresses_command("addresses --all --include-change --only-nonzero --limit 100")
+        if self._looks_like_fee_command(lowered):
+            return await self._fees_text()
         if self._looks_like_next_receive_command(lowered):
             count = self._extract_count(lowered, default=1)
             return await self._next_unused_receive_addresses(count=count, command=command)
@@ -184,7 +187,8 @@ class ConversationBridge:
             "`wwg wallets`\n"
             "`wwg next address`\n"
             "`wwg next 3`\n"
-            "`wwg addresses --wallet-index 1 --limit 5`"
+            "`wwg addresses --wallet-index 1 --limit 5`\n"
+            "`wwg fees`"
         )
 
     def _help_text(self) -> str:
@@ -196,7 +200,8 @@ class ConversationBridge:
             f"`{prefix}next 3` - return the next three unused receive addresses\n"
             f"`{prefix}addresses --wallet-index 1 --limit 5` - list receive addresses\n"
             f"`{prefix}addresses --wallet \"Wallet name\" --include-change --only-used` - list matching addresses\n"
-            f"`{prefix}balance` - show non-zero receive/change addresses across wallets"
+            f"`{prefix}balance` - show non-zero receive/change addresses across wallets\n"
+            f"`{prefix}fees` - show local Mempool low/medium/high fee recommendations"
         )
 
     def _wallets_text(self) -> str:
@@ -207,6 +212,19 @@ class ConversationBridge:
         for index, wallet in enumerate(wallets, start=1):
             lines.append(f"{index}. {wallet['name']} ({wallet['network']} / {wallet['wallet_type']})")
         return "\n".join(lines)
+
+    @staticmethod
+    def _looks_like_fee_command(lowered: str) -> bool:
+        return lowered in {"fees", "fee", "mempool fees", "mempool fee", "fee estimates", "recommended fees"}
+
+    async def _fees_text(self) -> str:
+        mempool = MempoolClient(self.config.get("mempool") or {})
+        fees = await mempool.get_recommended_fees()
+        summary = format_mempool_fee_summary(fees)
+        first_line, _, rest = summary.partition("\n")
+        if rest:
+            return f"**{first_line}**\n{rest}"
+        return f"**{summary}**"
 
     @staticmethod
     def _looks_like_next_receive_command(lowered: str) -> bool:

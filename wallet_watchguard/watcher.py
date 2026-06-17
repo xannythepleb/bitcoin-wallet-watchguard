@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tomllib
+from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,19 @@ from .electrum import ElectrumClient
 from .mempool import MempoolClient, mempool_fee_rate, mempool_tx_status
 from .models import WalletEvent
 from .ntfy import NtfyNotifier, decrypt_conversation_ntfy_config, decrypt_ntfy_config
+
+
+def get_app_version() -> str:
+    try:
+        return package_version("wallet-watchguard")
+    except PackageNotFoundError:
+        pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
+        try:
+            with pyproject_path.open("rb") as handle:
+                data = tomllib.load(handle)
+            return str(data.get("project", {}).get("version", "unknown"))
+        except Exception:
+            return "unknown"
 
 
 class Watcher:
@@ -131,8 +146,12 @@ class Watcher:
         mempool = self.config.get("mempool") or {}
 
         print("", flush=True)
-        print("Bitcoin Wallet Watchguard is running", flush=True)
+        version = get_app_version()
+        version_label = f"v{version}" if version != "unknown" and not version.startswith("v") else version
+
+        print(f"Bitcoin Wallet Watchguard {version_label} by xannythepleb is running", flush=True)
         print("-------------------------------------", flush=True)
+        print(f"Version: {version_label}", flush=True)
         print(f"Config: {self.config_path}", flush=True)
         print(f"Database: {self.config['app']['database_path']}", flush=True)
         print(
@@ -156,12 +175,16 @@ class Watcher:
         conversation = self.config.get("conversation") or {}
         requested = bool(conversation.get("enabled", False))
         conversation_topic = self.decrypted_conversation_ntfy_config.get("topic", ntfy["topic"])
-        print(
-            "Conversation Mode: "
-            + ("running" if self._conversation_started else ("requested but disabled" if requested else "off"))
-            + (f" on {self.decrypted_ntfy_config['server'].rstrip('/')}/{conversation_topic}" if requested else ""),
-            flush=True,
-        )
+        if self._conversation_started:
+            conversation_status = "enabled"
+            conversation_extra = f" on {self.decrypted_ntfy_config['server'].rstrip('/')}/{conversation_topic}"
+        elif requested:
+            conversation_status = "disabled"
+            conversation_extra = " (requested, but not running; check permission/protection messages above)"
+        else:
+            conversation_status = "disabled"
+            conversation_extra = ""
+        print(f"Conversation Mode: {conversation_status}{conversation_extra}", flush=True)
         print(f"Subscribed scripts: {self._subscription_count}", flush=True)
         print("", flush=True)
         print("Wallets:", flush=True)
@@ -178,6 +201,8 @@ class Watcher:
         print(f"  wwg addresses --config {self.config_path} --limit 20", flush=True)
         print(f'  wwg addresses --config {self.config_path} --wallet "<wallet name>" --limit 20', flush=True)
         print(f"  wwg addresses --config {self.config_path} --all --include-change --limit 20", flush=True)
+        if bool(mempool.get("enabled", False)):
+            print(f"  wwg fees --config {self.config_path}", flush=True)
         if bool((self.config.get("conversation") or {}).get("enabled", False)):
             print("  ntfy conversation: send 'wwg help' to the protected topic", flush=True)
         print("", flush=True)
