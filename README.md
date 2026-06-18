@@ -41,6 +41,7 @@ wwg init --add ntfy
 wwg init --add electrum
 wwg init --add wallet
 wwg init --add mempool
+wwg init --add tor
 wwg init --add app
 wwg init --reset
 ```
