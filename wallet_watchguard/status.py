@@ -211,13 +211,17 @@ def build_status_text(
                 "",
                 "Useful commands:",
                 "  wwg status",
-                "  wwg test-ntfy",
-                "  wwg test-tor",
-                "  wwg tor status",
+                "  wwg wallets",
+                "  wwg balance",
+                "  wwg next address",
+                "  wwg next 3",
                 "  wwg addresses --limit 20",
                 "  wwg addresses --wallet \"<wallet name>\" --limit 20",
                 "  wwg addresses --all --include-change --limit 20",
-                "  wwg balance",
+                "  wwg test-ntfy",
+                "  wwg test-tor",
+                "  wwg tor status",
+                "  wwg init --add <section>",
             ]
         )
         if mempool_enabled:

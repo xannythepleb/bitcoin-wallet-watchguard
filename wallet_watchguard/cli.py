@@ -11,7 +11,7 @@ from urllib.parse import urlparse, urlunparse
 
 import yaml
 
-from .config import default_config, load_config, load_config_for_edit, save_config
+from .config import PLACEHOLDER_NTFY_TOPIC, default_config, load_config, load_config_for_edit, save_config
 from .crypto import (
     decrypt_xpub_with_passphrase,
     encrypt_string_with_passphrase,
@@ -38,10 +38,38 @@ INIT_SECTIONS = ["full", "electrum", "ntfy", "wallet", "app", "mempool", "tor", 
 DEFAULT_CONFIG_PATH = os.environ.get("WWG_CONFIG_PATH", "./config.yaml")
 
 
-def _prompt(label: str, default: str | None = None) -> str:
-    suffix = f" [{default}]" if default is not None else ""
+def _prompt(label: str, default: str | None = None, *, display_default: str | None = None) -> str:
+    # display_default lets us show a friendly hint (e.g. "not yet set") while
+    # still falling back to a real value when the user just presses Enter.
+    shown = display_default if display_default is not None else default
+    suffix = f" [{shown}]" if shown is not None else ""
     value = input(f"{label}{suffix}: ").strip()
     return value or (default or "")
+
+
+def _print_feature_skipped(feature_label: str, init_section: str) -> None:
+    print()
+    print(f"Skipping {feature_label} setup for now.")
+    print("You can configure it later with:")
+    print(f"  wwg init --add {init_section}")
+
+
+def _parse_address_count(raw: str | None) -> int:
+    """Parse the count token accepted by `wwg next`.
+
+    Accepts a number (`wwg next 3`), the words address/addresses
+    (`wwg next address`), or nothing (`wwg next`). Anything non-numeric falls
+    back to 1 so the documented natural forms all work.
+    """
+    if raw is None:
+        return 1
+    text = str(raw).strip().lower()
+    if not text or text in {"address", "addresses", "receive"}:
+        return 1
+    try:
+        return max(1, int(text))
+    except ValueError:
+        return 1
 
 
 def _prompt_secret(label: str) -> str:
@@ -222,7 +250,9 @@ def _prompt_electrum_config(existing_electrum: dict | None = None) -> dict[str, 
 
 def _prompt_ntfy_start9_config(passphrase: str, existing_ntfy: dict | None = None) -> dict[str, object]:
     existing_ntfy = existing_ntfy or {}
-    existing_topic = existing_ntfy.get("topic")
+    existing_topic = str(existing_ntfy.get("topic") or "").strip()
+    if existing_topic == PLACEHOLDER_NTFY_TOPIC:
+        existing_topic = ""
     suggested_topic = existing_topic or f"wallet-watchguard-{secrets.token_hex(12)}"
 
     print()
@@ -294,17 +324,32 @@ def _prompt_ntfy_config(passphrase: str, existing_ntfy: dict | None = None) -> d
     print("For Conversation Mode, Wallet Watchguard needs credentials that can both read and write the topic.")
     print("Avoid broad anonymous publish permissions unless you deliberately want that.")
 
-    if existing_ntfy.get("topic"):
+    stored_topic = str(existing_ntfy.get("topic") or "").strip()
+    if stored_topic and stored_topic != PLACEHOLDER_NTFY_TOPIC:
         print()
-        print(f"Existing topic stored in config: {existing_ntfy['topic']}")
+        print(f"Existing topic stored in config: {stored_topic}")
         print("Use this exact topic name when creating Start9 publisher credentials or read-write Conversation Mode credentials, unless you want to change topics.")
 
     if _prompt_bool("Are you using Start9/StartOS 'Provision Publisher' details", False):
         return _prompt_ntfy_start9_config(passphrase, existing_ntfy)
 
     ntfy_server = _prompt("ntfy server URL", str(existing_ntfy.get("server", "https://ntfy.example.com")))
-    random_topic = f"wallet-watchguard-{secrets.token_hex(12)}"
-    ntfy_topic = _prompt("Private ntfy topic", str(existing_ntfy.get("topic", random_topic)))
+
+    existing_topic = str(existing_ntfy.get("topic") or "").strip()
+    if existing_topic and existing_topic != PLACEHOLDER_NTFY_TOPIC:
+        ntfy_topic = _prompt("Private ntfy topic", existing_topic)
+    else:
+        # No real topic chosen yet. Never show the internal placeholder. Offer a
+        # freshly generated private topic as the default the user gets on Enter.
+        random_topic = f"wallet-watchguard-{secrets.token_hex(12)}"
+        print()
+        print("A private, hard to guess topic keeps your alerts and commands away from prying eyes.")
+        print("Press Enter to accept a freshly generated private topic, or type your own.")
+        ntfy_topic = _prompt(
+            "Private ntfy topic",
+            random_topic,
+            display_default="not yet set; press Enter to generate one",
+        )
 
     auth = existing_ntfy.get("auth") or {}
     plaintext_token = existing_ntfy.get("token")
@@ -360,11 +405,16 @@ def _prompt_ntfy_config(passphrase: str, existing_ntfy: dict | None = None) -> d
     print("  - Conversation Mode needs read-write credentials.")
     print("  - For Conversation Mode, create a regular ntfy user, grant it read-write access to the topic, then create an access token in the ntfy web UI.")
 
-    existing_auth_type = auth.get("type", "token")
+    existing_auth_type = auth.get("type", "none")
     if existing_auth_type not in ["none", "token", "basic"]:
         existing_auth_type = "token"
 
-    auth_type = _prompt("Auth mode: none/token/basic", existing_auth_type).lower()
+    # Default to token: it is the recommended mode and the only sensible choice
+    # for Conversation Mode. "none" almost always appears only because it is the
+    # unconfigured default, so we don't want to steer users towards it.
+    default_auth_type = existing_auth_type if existing_auth_type in {"token", "basic"} else "token"
+
+    auth_type = _prompt("Auth mode: none/token/basic", default_auth_type).lower()
 
     if auth_type not in ["none", "token", "basic"]:
         raise ValueError("ntfy auth mode must be one of: none, token, basic")
@@ -430,14 +480,21 @@ def _prompt_mempool_config(existing_mempool: dict | None = None) -> dict[str, ob
     print("For Start9/StartOS or LAN services with self-signed TLS certificates, disable TLS verification below.")
 
     enabled = _prompt_bool("Enable Mempool API enrichment", bool(existing_mempool.get("enabled", False)))
-    base_url_default = str(existing_mempool.get("base_url") or "https://mempool.example.com/api")
-    base_url = _prompt("Mempool API base URL", base_url_default) if enabled else str(existing_mempool.get("base_url") or "")
+
+    if not enabled:
+        _print_feature_skipped("Mempool API enrichment", "mempool")
+        default_mempool = default_config().get("mempool") or {}
+        merged = {**default_mempool, **existing_mempool}
+        merged["enabled"] = False
+        return merged
+
+    base_url = _prompt("Mempool API base URL", str(existing_mempool.get("base_url") or "https://mempool.example.com/api"))
 
     return {
-        "enabled": enabled,
+        "enabled": True,
         "base_url": base_url.rstrip("/"),
-        "tls_verify": _prompt_bool("Verify Mempool TLS certificate", bool(existing_mempool.get("tls_verify", True))) if enabled else bool(existing_mempool.get("tls_verify", True)),
-        "timeout_seconds": int(_prompt("Mempool timeout seconds", str(existing_mempool.get("timeout_seconds", 15)))) if enabled else int(existing_mempool.get("timeout_seconds", 15)),
+        "tls_verify": _prompt_bool("Verify Mempool TLS certificate", bool(existing_mempool.get("tls_verify", True))),
+        "timeout_seconds": int(_prompt("Mempool timeout seconds", str(existing_mempool.get("timeout_seconds", 15)))),
         "enrich_notifications": True,
     }
 
@@ -452,10 +509,18 @@ def _prompt_tor_config(existing_tor: dict | None = None) -> dict[str, object]:
     print("This is OFF by default. Existing electrum.socks_proxy setups still work without this switch.")
 
     enabled = _prompt_bool("Enable internal Tor upstream", bool(existing_tor.get("enabled", False)))
+
+    if not enabled:
+        _print_feature_skipped("Tor upstream", "tor")
+        default_tor = default_config().get("tor") or {}
+        merged = {**default_tor, **existing_tor}
+        merged["enabled"] = False
+        return merged
+
     socks_proxy = _prompt("Internal Tor SOCKS proxy", str(existing_tor.get("socks_proxy") or "127.0.0.1:9050"))
 
     return {
-        "enabled": enabled,
+        "enabled": True,
         "socks_proxy": socks_proxy,
         "manage_process": _prompt_bool("Let Wallet Watchguard start the Tor process", bool(existing_tor.get("manage_process", True))),
         "startup_timeout_seconds": int(_prompt("Tor startup timeout seconds", str(existing_tor.get("startup_timeout_seconds", 60)))),
@@ -473,7 +538,9 @@ def _prompt_conversation_config(
     existing_ntfy = existing_ntfy or {}
     existing_ntfy_auth = existing_ntfy.get("auth") or {"type": "none"}
     existing_ntfy_auth_type = str(existing_ntfy_auth.get("type", "none"))
-    existing_ntfy_topic = str(existing_ntfy.get("topic") or "wallet-watchguard-replace-me").strip("/")
+    raw_ntfy_topic = str(existing_ntfy.get("topic") or "").strip("/")
+    existing_ntfy_topic = "" if raw_ntfy_topic == PLACEHOLDER_NTFY_TOPIC else raw_ntfy_topic
+    ntfy_topic_display = existing_ntfy_topic or "not yet set; configure ntfy first with 'wwg init --add ntfy'"
 
     print()
     print("Conversation Mode")
@@ -493,13 +560,25 @@ def _prompt_conversation_config(
 
     enabled = _prompt_bool("Enable Conversation Mode in config", bool(existing_conversation.get("enabled", False)))
 
+    if not enabled:
+        _print_feature_skipped("Conversation Mode", "conversation")
+        default_conversation = default_config().get("conversation") or {}
+        merged = {**default_conversation, **existing_conversation}
+        merged["enabled"] = False
+        return merged
+
     existing_topic = str(existing_conversation.get("topic") or "").strip("/")
     use_separate_topic_default = bool(existing_topic)
     use_separate_topic = _prompt_bool("Use a separate ntfy topic for Conversation Mode", use_separate_topic_default)
 
     topic = ""
     if use_separate_topic:
-        suggested_topic = existing_topic or f"{existing_ntfy_topic}-conversation"
+        if existing_topic:
+            suggested_topic = existing_topic
+        elif existing_ntfy_topic:
+            suggested_topic = f"{existing_ntfy_topic}-conversation"
+        else:
+            suggested_topic = f"wallet-watchguard-conversation-{secrets.token_hex(8)}"
         print()
         print("Create this topic in ntfy and grant your Conversation Mode credential read-write access to it.")
         print("Anonymous read and anonymous write must stay denied.")
@@ -508,7 +587,7 @@ def _prompt_conversation_config(
             raise ValueError("Conversation Mode topic must not be blank when using a separate topic")
     else:
         print()
-        print(f"Conversation Mode will use the normal ntfy topic: {existing_ntfy_topic}")
+        print(f"Conversation Mode will use the normal ntfy topic: {ntfy_topic_display}")
 
     print()
     print("Conversation Mode credentials")
@@ -538,7 +617,7 @@ def _prompt_conversation_config(
     command_prefix = _prompt("Command prefix", str(existing_conversation.get("command_prefix", "wwg")))
 
     return {
-        "enabled": enabled,
+        "enabled": True,
         "topic": topic,
         "auth": auth,
         "command_prefix": command_prefix,
@@ -875,11 +954,14 @@ def _print_tor_next_steps(config_path: Path, *, enabled: bool) -> None:
 
 async def _cmd_test_ntfy_async(config: dict, passphrase: str) -> None:
     notifier = NtfyNotifier(decrypt_ntfy_config(config["ntfy"], passphrase))
+    message = (
+        "Bitcoin Wallet Watchguard successfully published this test notification via ntfy.\n\n"
+        "This is free and open source software made by a fellow bitcoiner.\n"
+        "If you appreciate it, my Lightning address is xanny@cake.cash ⚡"
+    )
     await notifier.send(
-        "Wallet Watchguard: Test Alert",
-        "Bitcoin Wallet Watchguard successfully published this test notification via ntfy.",
-        "This is free and open source software made by a fellow bitcoiner.",
-        "If you appreciate it, my Lightning address is xanny@cake.cash ⚡",
+        "⚡ Wallet Watchguard: Test Alert",
+        message,
         priority="default",
         tags="white_check_mark,bitcoin",
     )
@@ -1000,7 +1082,7 @@ async def _cmd_addresses_async(config: dict, passphrase: str, args: argparse.Nam
 
     # ElectrumClient.call() is completed by ElectrumClient.listen(), which reads
     # JSON-RPC responses from the socket. The long-running watcher already starts
-    # listen(), but this one-shot CLI command did not. Without this background
+    # listen(), but this one shot CLI command did not. Without this background
     # reader, balance/history calls can time out after printing only the table
     # header.
     listener_task = asyncio.create_task(client.listen(ignore_notifications))
@@ -1106,6 +1188,54 @@ async def _cmd_fees_async(config: dict) -> None:
     mempool = MempoolClient(config.get("mempool") or {})
     fees = await mempool.get_recommended_fees()
     print(format_mempool_fee_summary(fees))
+
+
+async def _cmd_next_async(config: dict, passphrase: str, args: argparse.Namespace, *, count: int) -> None:
+    client = _make_electrum_client(config)
+
+    async def ignore_notifications(message: dict) -> None:
+        _ = message
+
+    await client.connect()
+    # As with the addresses command, ElectrumClient.call() is only completed by a
+    # running listen() loop, so start one for this one shot command.
+    listener_task = asyncio.create_task(client.listen(ignore_notifications))
+
+    try:
+        wallets = _select_wallets_for_addresses(config, args)
+        default_lookahead = int(config["app"].get("lookahead", 100))
+
+        for wallet in wallets:
+            scan_limit = max(int(wallet.get("lookahead", default_lookahead)), count)
+            derived = _derive_for_cli(config, wallet, passphrase, branch=0, limit=scan_limit)
+
+            found = []
+            for item in derived:
+                history = await client.call("blockchain.scripthash.get_history", [item.scripthash])
+                if not history:
+                    found.append(item)
+                    if len(found) >= count:
+                        break
+
+            print()
+            print(f"Wallet: {wallet['name']} ({wallet['network']} / {wallet['wallet_type']})")
+            if not found:
+                print(f"No unused receive address found within lookahead {scan_limit}.")
+                print("Increase the wallet lookahead or check the wallet derivation path.")
+                continue
+
+            label = "address" if len(found) == 1 else "addresses"
+            print(f"Next unused receive {label}:")
+            for item in found:
+                print(f"  {item.path:<18} {item.address}")
+    finally:
+        listener_task.cancel()
+        try:
+            await listener_task
+        except asyncio.CancelledError:
+            pass
+        await client.close()
+
 
 def cmd_init(args: argparse.Namespace) -> int:
     config_path = Path(args.config)
@@ -1238,6 +1368,53 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_wallets(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    wallets = config.get("wallets") or []
+    if not wallets:
+        print("No wallets are configured.")
+        print(f"Add one with: wwg init --config {args.config} --add wallet")
+        return 0
+
+    print("Configured wallets:")
+    for index, wallet in enumerate(wallets):
+        print(f"  {_wallet_label(wallet, index)}")
+    return 0
+
+
+def cmd_next(args: argparse.Namespace) -> int:
+    config = _runtime_config(load_config(args.config), args)
+    passphrase = args.passphrase or get_passphrase_from_env_or_prompt()
+    count = _parse_address_count(args.count)
+    asyncio.run(_cmd_next_async(config, passphrase, args, count=count))
+    return 0
+
+
+def cmd_balance(args: argparse.Namespace) -> int:
+    config = _runtime_config(load_config(args.config), args)
+    passphrase = args.passphrase or get_passphrase_from_env_or_prompt()
+
+    # `wwg balance` is `wwg addresses` scoped to non-zero balances, including the
+    # change branch. With no wallet filter it covers every configured wallet,
+    # matching the Conversation Mode `balance` command.
+    scoped = args.wallet is not None or args.wallet_index is not None
+    balance_args = argparse.Namespace(
+        config=args.config,
+        passphrase=passphrase,
+        wallet=args.wallet,
+        wallet_index=args.wallet_index,
+        all=not scoped,
+        limit=int(args.limit),
+        include_change=True,
+        only_nonzero=True,
+        only_used=False,
+        debug=getattr(args, "debug", False),
+        tor_upstream=getattr(args, "tor_upstream", False),
+    )
+    asyncio.run(_cmd_addresses_async(config, passphrase, balance_args))
+    return 0
+
+
 def cmd_test_tor(args: argparse.Namespace) -> int:
     config = _runtime_config(load_config(args.config), args)
     result = asyncio.run(_cmd_test_tor_async(config))
@@ -1340,6 +1517,45 @@ def build_parser() -> argparse.ArgumentParser:
     p_status.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     _add_tor_upstream_arg(p_status)
     p_status.set_defaults(func=cmd_status)
+
+    p_wallets = sub.add_parser(
+        "wallets",
+        aliases=["list-wallets"],
+        help="List configured wallets",
+    )
+    p_wallets.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_wallets.set_defaults(func=cmd_wallets)
+
+    p_next = sub.add_parser(
+        "next",
+        aliases=["next-address"],
+        help="Show the next unused receive address(es), e.g. 'wwg next address' or 'wwg next 3'",
+    )
+    p_next.add_argument(
+        "count",
+        nargs="?",
+        default="1",
+        help="How many unused receive addresses to show (a number, or the word 'address')",
+    )
+    p_next.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_next.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt/env")
+    p_next.add_argument("--wallet", default=None, help="Only use one wallet by exact name or unique partial name")
+    p_next.add_argument("--wallet-index", type=int, default=None, help="Only use one wallet by its 1-based index in config")
+    _add_tor_upstream_arg(p_next)
+    p_next.set_defaults(func=cmd_next)
+
+    p_balance = sub.add_parser(
+        "balance",
+        help="Show addresses with a non-zero balance across wallets (receive and change)",
+    )
+    p_balance.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_balance.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt/env")
+    p_balance.add_argument("--wallet", default=None, help="Only show one wallet by exact name or unique partial name")
+    p_balance.add_argument("--wallet-index", type=int, default=None, help="Only show one wallet by its 1-based index in config")
+    p_balance.add_argument("--limit", type=int, default=100, help="Number of receive/change addresses to scan per wallet")
+    p_balance.add_argument("--debug", action="store_true", help="Print derivation and Electrum query diagnostics to stderr")
+    _add_tor_upstream_arg(p_balance)
+    p_balance.set_defaults(func=cmd_balance)
 
     p_test_tor = sub.add_parser("test-tor", help="Test the configured Tor upstream by querying Electrum/Fulcrum")
     p_test_tor.add_argument("--config", default=DEFAULT_CONFIG_PATH)

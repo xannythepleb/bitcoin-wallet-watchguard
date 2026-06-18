@@ -47,7 +47,7 @@ ntfy:
     type: "none"
 
   priority: "high"
-  tags: "bitcoin,watch"
+  tags: "bitcoin"
 
   # Set to false for Start9/StartOS or local ntfy services that use
   # self-signed TLS certificates.
