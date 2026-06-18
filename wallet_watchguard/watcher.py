@@ -205,12 +205,13 @@ class Watcher:
             )
         print("", flush=True)
         print("Useful commands:", flush=True)
-        print(f"  wwg test-ntfy --config {self.config_path}", flush=True)
-        print(f"  wwg addresses --config {self.config_path} --limit 20", flush=True)
-        print(f'  wwg addresses --config {self.config_path} --wallet "<wallet name>" --limit 20', flush=True)
-        print(f"  wwg addresses --config {self.config_path} --all --include-change --limit 20", flush=True)
+        print(f"  wwg test-ntfy", flush=True)
+        print(f"  wwg addresses --limit 20", flush=True)
+        print(f'  wwg addresses --wallet "<wallet name>" --limit 20', flush=True)
+        print(f"  wwg addresses --all --include-change --limit 20", flush=True)
+        print(f"  wwg balance", flush=True)
         if mempool_enabled:
-            print(f"  wwg fees --config {self.config_path}", flush=True)
+            print(f"  wwg fees", flush=True)
         if bool((self.config.get("conversation") or {}).get("enabled", False)):
             print("  ntfy conversation: send 'wwg help' to the protected topic", flush=True)
         print("", flush=True)
