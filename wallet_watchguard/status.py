@@ -27,26 +27,86 @@ def format_server_version(result: Any) -> str:
     return str(result)
 
 
-def tor_upstream_line(config: dict[str, Any], *, tor_connectivity_result: str | None = None) -> str:
+def _format_bool(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def _split_connectivity_result(result: str) -> tuple[str, str | None]:
+    """
+    Split a compact connectivity result into a status and optional detail.
+    """
+    stripped = result.strip()
+
+    for status in ("ok", "failed"):
+        bracket_prefix = f"{status} ("
+        if stripped.startswith(bracket_prefix) and stripped.endswith(")"):
+            return status, stripped[len(bracket_prefix) : -1]
+
+        plain_prefix = f"{status} "
+        if stripped.startswith(plain_prefix):
+            return status, stripped[len(plain_prefix) :].strip() or None
+
+        if stripped == status:
+            return status, None
+
+    return stripped, None
+
+
+def _effective_socks_proxy(config: dict[str, Any]) -> str:
+    """
+    Return the SOCKS proxy that the Electrum/Fulcrum client will use.
+    Internal or external SOCKS proxy?
+    """
     tor_cfg = tor_config_from_app_config(config)
+    if tor_cfg.enabled:
+        return tor_cfg.socks_proxy
+
     electrum = config.get("electrum") or {}
-    manual_socks_proxy = str(electrum.get("socks_proxy") or "").strip()
+    return str(electrum.get("socks_proxy") or "").strip()
+
+
+def electrum_upstream_lines(
+    config: dict[str, Any],
+    *,
+    electrum_connectivity_result: str | None = None,
+) -> list[str]:
+    electrum = config["electrum"]
+    socks_proxy = _effective_socks_proxy(config)
+
+    lines = [
+        "Electrum/Fulcrum:",
+        f"  Server: {electrum['host']}:{electrum['port']}",
+        f"  TLS: {_format_bool(bool(electrum.get('tls', True)))}",
+        f"  TLS verify: {_format_bool(bool(electrum.get('tls_verify', True)))}",
+        f"  SOCKS proxy: {socks_proxy or 'none'}",
+    ]
+
+    if electrum_connectivity_result:
+        status, detail = _split_connectivity_result(electrum_connectivity_result)
+        lines.append(f"  Connectivity test: {status}")
+        if detail:
+            label = "Server version" if status == "ok" else "Failure detail"
+            lines.append(f"  {label}: {detail}")
+
+    return lines
+
+
+def tor_upstream_lines(config: dict[str, Any]) -> list[str]:
+    tor_cfg = tor_config_from_app_config(config)
 
     if tor_cfg.enabled:
-        parts = ["enabled", f"proxy={tor_cfg.socks_proxy}"]
-        parts.append("managed_process=true" if tor_cfg.manage_process else "managed_process=false")
-        if tor_connectivity_result:
-            parts.append(f"test={tor_connectivity_result}")
-        elif tor_cfg.test_on_startup:
-            parts.append("test=pending")
-        else:
-            parts.append("test=disabled")
-        return "Tor Upstream: " + " ".join(parts)
+        return [
+            "Tor Upstream: enabled",
+            f"  Proxy: {tor_cfg.socks_proxy}",
+            f"  Managed process: {_format_bool(tor_cfg.manage_process)}",
+            f"  Test on startup: {_format_bool(tor_cfg.test_on_startup)}",
+        ]
 
-    if manual_socks_proxy:
-        return f"Tor Upstream: disabled (manual SOCKS proxy configured: {manual_socks_proxy})"
+    return ["Tor Upstream: disabled"]
 
-    return "Tor Upstream: disabled"
+
+def tor_upstream_line(config: dict[str, Any]) -> str:
+    return "\n".join(tor_upstream_lines(config))
 
 
 def build_status_text(
@@ -57,10 +117,20 @@ def build_status_text(
     conversation_ntfy_config: dict[str, Any] | None = None,
     subscription_count: int | None = None,
     conversation_started: bool | None = None,
+    electrum_connectivity_result: str | None = None,
     tor_connectivity_result: str | None = None,
     include_useful_commands: bool = True,
 ) -> str:
-    electrum = config["electrum"]
+    """
+    Build the startup/status text shown in the terminal and Conversation Mode.
+
+    tor_connectivity_result is kept as a backwards-compatible alias for earlier
+    call sites. New code should pass electrum_connectivity_result because the
+    server.version result belongs to the Electrum/Fulcrum connection, not Tor.
+    """
+    if electrum_connectivity_result is None and tor_connectivity_result is not None:
+        electrum_connectivity_result = tor_connectivity_result
+
     ntfy = ntfy_config or config["ntfy"]
     mempool_config = config.get("mempool") or {}
     conversation = config.get("conversation") or {}
@@ -75,15 +145,21 @@ def build_status_text(
         f"Version: {version_label}",
         f"Config: {config_path}",
         f"Database: {config['app']['database_path']}",
-        "Electrum/Fulcrum: "
-        f"{electrum['host']}:{electrum['port']} "
-        f"tls={bool(electrum.get('tls', True))} "
-        f"tls_verify={bool(electrum.get('tls_verify', True))}",
-        tor_upstream_line(config, tor_connectivity_result=tor_connectivity_result),
+    ]
+
+    lines.extend(
+        electrum_upstream_lines(
+            config,
+            electrum_connectivity_result=electrum_connectivity_result,
+        )
+    )
+    lines.extend(tor_upstream_lines(config))
+
+    lines.append(
         f"ntfy: {str(ntfy['server']).rstrip('/')}/{ntfy['topic']} "
         f"auth={(ntfy.get('auth') or {}).get('type', 'none')} "
-        f"tls_verify={bool(ntfy.get('tls_verify', True))}",
-    ]
+        f"tls_verify={_format_bool(bool(ntfy.get('tls_verify', True)))}"
+    )
 
     mempool_enabled = bool(mempool_config.get("enabled", False))
     mempool_base_url = str(mempool_config.get("base_url", "") or "")
@@ -93,7 +169,8 @@ def build_status_text(
         lines.append(
             "Mempool API: enabled"
             + (f" ({mempool_base_url})" if mempool_base_url else "")
-            + f" tls_verify={mempool_tls_verify} enrich_notifications={mempool_enrich}"
+            + f" tls_verify={_format_bool(mempool_tls_verify)}"
+            + f" enrich_notifications={_format_bool(mempool_enrich)}"
         )
     else:
         lines.append("Mempool API: disabled")
