@@ -830,23 +830,23 @@ def _print_save_summary(config_path: Path, config: dict) -> None:
         print()
         print("Note: this config does not contain any wallet xpubs yet.")
         print("Add one with:")
-        print(f"  wwg init --config {config_path} --add wallet")
+        print(f"  wwg init --add wallet")
         print()
         print("Docker Compose:")
-        print(f"  docker compose run --rm wallet-watchguard wwg init --config {config_path} --add wallet")
+        print(f"  docker compose run --rm wallet-watchguard wwg init --add wallet")
         return
 
     print("Run locally with:")
-    print(f"  wwg run --config {config_path}")
+    print(f"  wwg run")
     print()
     print("Run via Docker Compose with:")
     print("  WWG_PASSPHRASE='your passphrase here' docker compose up -d")
     print()
     print("Useful checks:")
-    print(f"  wwg status --config {config_path}")
-    print(f"  wwg test-ntfy --config {config_path}")
-    print(f"  wwg test-tor --config {config_path}")
-    print(f"  wwg addresses --config {config_path} --limit 20")
+    print(f"  wwg status")
+    print(f"  wwg test-ntfy")
+    print(f"  wwg test-tor")
+    print(f"  wwg addresses --limit 20")
 
 
 def _make_electrum_client(config: dict) -> ElectrumClient:
@@ -943,9 +943,9 @@ def _print_tor_next_steps(config_path: Path, *, enabled: bool) -> None:
     print()
     if enabled:
         print("Next checks:")
-        print(f"  wwg tor status --config {config_path}")
-        print(f"  wwg test-tor --config {config_path}")
-        print(f"  wwg run --config {config_path}")
+        print(f"  wwg tor status")
+        print(f"  wwg test-tor")
+        print(f"  wwg run")
     else:
         print("Tor upstream is now disabled in config.yaml.")
         print("Manual electrum.socks_proxy settings, if present, were left untouched.")
