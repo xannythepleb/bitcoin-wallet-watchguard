@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 WalletType = Literal["taproot", "native_segwit", "nested_segwit", "legacy"]
 Network = Literal["bitcoin", "testnet", "signet", "regtest"]
@@ -33,3 +33,5 @@ class WalletEvent:
     fee_sats: int | None = None
     vsize: int | None = None
     fee_rate_sat_vb: float | None = None
+    tx_inputs: list[dict[str, Any]] | None = None
+    tx_outputs: list[dict[str, Any]] | None = None

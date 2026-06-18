@@ -262,33 +262,37 @@ class Watcher:
             await self._notify_activity(event)
         return True
 
+    @staticmethod
+    def _fallback_event(watched: Any, txid: str, electrum_height: int) -> WalletEvent:
+        return WalletEvent(
+            wallet_name=watched["wallet_name"],
+            txid=txid,
+            event_type="activity",
+            amount_sats=0,
+            status="unconfirmed" if electrum_height <= 0 else "confirmed",
+            height=electrum_height,
+            address=watched["address"],
+            path=watched["path"],
+        )
+
     async def _build_event(self, watched: Any, txid: str, electrum_height: int) -> WalletEvent:
         if not self.mempool.enabled:
-            return WalletEvent(
-                wallet_name=watched["wallet_name"],
-                txid=txid,
-                event_type="activity",
-                amount_sats=0,
-                status="unconfirmed" if electrum_height <= 0 else "confirmed",
-                height=electrum_height,
-                address=watched["address"],
-                path=watched["path"],
-            )
+            return self._fallback_event(watched, txid, electrum_height)
 
         try:
             tx = await self.mempool.get_tx(txid)
-        except Exception:
-            return WalletEvent(
-                wallet_name=watched["wallet_name"],
-                txid=txid,
-                event_type="activity",
-                amount_sats=0,
-                status="unconfirmed" if electrum_height <= 0 else "confirmed",
-                height=electrum_height,
-                address=watched["address"],
-                path=watched["path"],
-            )
+            return await self._build_enriched_event(watched, txid, electrum_height, tx)
+        except Exception as exc:
+            print(f"Mempool enrichment failed for {txid}; sending generic wallet activity notification: {exc}", flush=True)
+            return self._fallback_event(watched, txid, electrum_height)
 
+    async def _build_enriched_event(
+        self,
+        watched: Any,
+        txid: str,
+        electrum_height: int,
+        tx: dict[str, Any],
+    ) -> WalletEvent:
         wallet_scripts = await self.db.get_watched_scripts_for_wallet(watched["wallet_name"])
         owned_by_script = {row["script_pubkey"]: row for row in wallet_scripts}
 
@@ -296,21 +300,47 @@ class Watcher:
         owned_output_sats = 0
         touched_address = watched["address"]
         touched_path = watched["path"]
+        tx_inputs: list[dict[str, Any]] = []
+        tx_outputs: list[dict[str, Any]] = []
 
-        for vin in tx.get("vin") or []:
+        for position, vin in enumerate(tx.get("vin") or []):
             prevout = vin.get("prevout") or {}
             script = prevout.get("scriptpubkey")
-            if script in owned_by_script:
+            owned = script in owned_by_script
+            if owned:
                 owned_input_sats += int(prevout.get("value") or 0)
                 touched_address = owned_by_script[script]["address"]
                 touched_path = owned_by_script[script]["path"]
 
-        for vout in tx.get("vout") or []:
+            tx_inputs.append(
+                {
+                    "index": position,
+                    "address": prevout.get("scriptpubkey_address"),
+                    "value_sats": int(prevout.get("value") or 0),
+                    "owned": owned,
+                    "path": owned_by_script[script]["path"] if owned else None,
+                    "txid": vin.get("txid"),
+                    "vout": vin.get("vout"),
+                }
+            )
+
+        for position, vout in enumerate(tx.get("vout") or []):
             script = vout.get("scriptpubkey")
-            if script in owned_by_script:
+            owned = script in owned_by_script
+            if owned:
                 owned_output_sats += int(vout.get("value") or 0)
                 touched_address = owned_by_script[script]["address"]
                 touched_path = owned_by_script[script]["path"]
+
+            tx_outputs.append(
+                {
+                    "index": position,
+                    "address": vout.get("scriptpubkey_address"),
+                    "value_sats": int(vout.get("value") or 0),
+                    "owned": owned,
+                    "path": owned_by_script[script]["path"] if owned else None,
+                }
+            )
 
         net_sats = owned_output_sats - owned_input_sats
         if net_sats > 0:
@@ -335,6 +365,8 @@ class Watcher:
             fee_sats=int(tx["fee"]) if tx.get("fee") is not None else None,
             vsize=int(tx["vsize"]) if tx.get("vsize") is not None else None,
             fee_rate_sat_vb=mempool_fee_rate(tx),
+            tx_inputs=tx_inputs,
+            tx_outputs=tx_outputs,
         )
 
     @staticmethod
@@ -346,6 +378,22 @@ class Watcher:
         if height <= 0:
             return (1, 0)
         return (0, height)
+
+    @staticmethod
+    def _format_tx_io_list(items: list[dict[str, Any]], *, mark_owned_outputs: bool = False) -> str:
+        lines: list[str] = []
+        for item in items:
+            marker = "✅ " if mark_owned_outputs and item.get("owned") else ""
+            address = item.get("address") or "unknown address"
+            value_sats = int(item.get("value_sats") or 0)
+            path = item.get("path")
+
+            line = f"- {marker}`{address}` — `{value_sats:,} sats`"
+            if path:
+                line += f" ({path})"
+            lines.append(line)
+
+        return "\n".join(lines)
 
     async def notify_latest_transaction_for_wallet(
         self,
@@ -456,10 +504,12 @@ class Watcher:
         if event.fee_rate_sat_vb is not None:
             lines.append(f"**Fee rate:** `{event.fee_rate_sat_vb:.2f} sat/vB`")
 
-        if event.address:
-            lines.append(f"**Address:** `{event.address}`")
+        if event.tx_inputs:
+            lines.append("**Inputs:**\n" + self._format_tx_io_list(event.tx_inputs))
+        if event.tx_outputs:
+            lines.append("**Outputs:**\n" + self._format_tx_io_list(event.tx_outputs, mark_owned_outputs=True))
         if event.path:
-            lines.append(f"**Path:** `{event.path}`")
+            lines.append(f"**Wallet path:** `{event.path}`")
 
         lines.append(f"**Tx:** `{event.txid}`")
         message = "\n\n".join(lines)
