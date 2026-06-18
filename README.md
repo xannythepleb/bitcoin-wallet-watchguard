@@ -55,6 +55,12 @@ For example:
 docker pull ghcr.io/xannythepleb/bitcoin-wallet-watchguard:latest
 ```
 
+Or:
+
+```bash
+docker run ghcr.io/xannythepleb/bitcoin-wallet-watchguard:latest wwg init
+```
+
 ## Conversation Mode Setup
 
 The standard method of generating ntfy access tokens already works perfectly for Conversation Mode:

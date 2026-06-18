@@ -18,3 +18,6 @@ RUN pip install --no-cache-dir .
 
 VOLUME ["/data"]
 CMD ["wwg", "run", "--config", "/data/config.yaml"]
+
+LABEL org.opencontainers.image.description DESCRIPTION="Bitcoin Wallet Watchguard: Talk to your Bitcoin node via Electrum and Ntfy"
+LABEL org.opencontainers.image.source=https://github.com/xannythepleb/bitcoin-wallet-watchguard
