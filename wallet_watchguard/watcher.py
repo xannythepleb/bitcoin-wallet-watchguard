@@ -11,7 +11,7 @@ from .db import Database
 from .derivation import derive_addresses
 from .electrum import ElectrumClient
 from .mempool import MempoolClient, mempool_fee_rate, mempool_tx_status
-from .models import WalletEvent
+from .models import DerivedAddress, WalletEvent
 from .ntfy import NtfyNotifier, decrypt_conversation_ntfy_config, decrypt_ntfy_config
 from .status import build_status_text, format_server_version
 from .tor import TorUpstreamManager
@@ -111,50 +111,66 @@ class Watcher:
             await self.db.close()
             await self.tor_upstream.stop()
 
-    async def _derive_store_and_subscribe(self) -> None:
+    def _derive_wallet_scripts(self, wallet: dict[str, Any], *, lookahead: int | None = None) -> list[DerivedAddress]:
         helper_path = self.config["app"].get("derivation_helper_path", "./wwg-derive")
         default_lookahead = int(self.config["app"].get("lookahead", 100))
+        lookahead = int(lookahead or wallet.get("lookahead", default_lookahead))
 
+        metadata = metadata_from_config(wallet["xpub_encryption"])
+        xpub = decrypt_xpub_with_passphrase(
+            encrypted_xpub_b64=wallet["encrypted_xpub"],
+            passphrase=self.passphrase,
+            metadata=metadata,
+        )
+
+        receive = derive_addresses(
+            helper_path=helper_path,
+            wallet_name=wallet["name"],
+            xpub=xpub,
+            network=wallet["network"],
+            wallet_type=wallet["wallet_type"],
+            account_path=wallet["account_path"],
+            path_template=wallet.get("receive_path_template", "0/*"),
+            branch=0,
+            start=0,
+            end=lookahead - 1,
+        )
+        change = derive_addresses(
+            helper_path=helper_path,
+            wallet_name=wallet["name"],
+            xpub=xpub,
+            network=wallet["network"],
+            wallet_type=wallet["wallet_type"],
+            account_path=wallet["account_path"],
+            path_template=wallet.get("change_path_template", "1/*"),
+            branch=1,
+            start=0,
+            end=lookahead - 1,
+        )
+
+        return receive + change
+
+    async def _derive_store_and_subscribe(self) -> None:
         for wallet in self.config["wallets"]:
-            metadata = metadata_from_config(wallet["xpub_encryption"])
-            xpub = decrypt_xpub_with_passphrase(
-                encrypted_xpub_b64=wallet["encrypted_xpub"],
-                passphrase=self.passphrase,
-                metadata=metadata,
-            )
-            lookahead = int(wallet.get("lookahead", default_lookahead))
-
-            receive = derive_addresses(
-                helper_path=helper_path,
-                wallet_name=wallet["name"],
-                xpub=xpub,
-                network=wallet["network"],
-                wallet_type=wallet["wallet_type"],
-                account_path=wallet["account_path"],
-                path_template=wallet.get("receive_path_template", "0/*"),
-                branch=0,
-                start=0,
-                end=lookahead - 1,
-            )
-            change = derive_addresses(
-                helper_path=helper_path,
-                wallet_name=wallet["name"],
-                xpub=xpub,
-                network=wallet["network"],
-                wallet_type=wallet["wallet_type"],
-                account_path=wallet["account_path"],
-                path_template=wallet.get("change_path_template", "1/*"),
-                branch=1,
-                start=0,
-                end=lookahead - 1,
-            )
-
-            scripts = receive + change
+            scripts = self._derive_wallet_scripts(wallet)
             await self.db.upsert_watched_scripts(scripts)
 
             for script in scripts:
-                await self.client.call("blockchain.scripthash.subscribe", [script.scripthash])
+                state_before = await self.db.get_scripthash_state(script.scripthash)
+                initial_status = await self.client.call("blockchain.scripthash.subscribe", [script.scripthash])
                 self._subscription_count += 1
+
+                # Electrum returns the current status as the subscription response.
+                # The old watcher ignored it and only reacted to later push
+                # notifications, so transactions that happened while the daemon was
+                # offline were silently missed. Process the initial status too, but
+                # baseline first-run/imported history without spamming old alerts.
+                has_existing_baseline = bool(state_before["last_status"] is not None or state_before["history_count"])
+                await self._process_scripthash_update(
+                    script.scripthash,
+                    initial_status,
+                    notify_new_items=has_existing_baseline,
+                )
 
     async def _test_tor_connectivity(self) -> None:
         try:
@@ -185,24 +201,66 @@ class Watcher:
         if not scripthash:
             return
 
+        await self._process_scripthash_update(scripthash, status, notify_new_items=True)
+
+    async def _process_scripthash_update(
+        self,
+        scripthash: str,
+        status: str | None,
+        *,
+        notify_new_items: bool,
+    ) -> int:
+        """Synchronise one scripthash and optionally notify for new tx history.
+
+        `blockchain.scripthash.subscribe` has two paths that matter here:
+
+        * the immediate subscription response containing the current status;
+        * later push notifications containing changed statuses.
+
+        Both need to update the local status/history database. Whether the new
+        history entries should notify is decided by the caller so startup can
+        baseline a newly imported wallet quietly, while normal live changes and
+        missed changes from an already-baselined wallet still alert.
+        """
         changed = await self.db.set_scripthash_status(scripthash, status)
-        if not changed:
-            return
+        if not changed and not notify_new_items:
+            return 0
 
         watched = await self.db.get_watched_script(scripthash)
         if not watched:
-            return
+            return 0
+
+        if status is None:
+            return 0
 
         history = await self.client.call("blockchain.scripthash.get_history", [scripthash])
         new_items = await self.db.remember_history(scripthash, history)
+
+        if not notify_new_items:
+            return len(new_items)
 
         for item in new_items:
             txid = item["tx_hash"]
             height = int(item.get("height", 0))
             event = await self._build_event(watched, txid, height)
+            await self._record_and_notify_event(event)
 
-            if await self.db.save_event(event):
-                await self._notify_activity(event)
+        return len(new_items)
+
+    def _should_notify_event(self, event: WalletEvent) -> bool:
+        app_config = self.config.get("app") or {}
+        if event.status == "unconfirmed" and not bool(app_config.get("notify_on_mempool", True)):
+            return False
+        if event.status == "confirmed" and not bool(app_config.get("notify_on_confirmed", True)):
+            return False
+        return True
+
+    async def _record_and_notify_event(self, event: WalletEvent) -> bool:
+        if not await self.db.save_event(event):
+            return False
+        if self._should_notify_event(event):
+            await self._notify_activity(event)
+        return True
 
     async def _build_event(self, watched: Any, txid: str, electrum_height: int) -> WalletEvent:
         if not self.mempool.enabled:
@@ -279,8 +337,95 @@ class Watcher:
             fee_rate_sat_vb=mempool_fee_rate(tx),
         )
 
-    async def _notify_activity(self, event: WalletEvent) -> None:
-        if event.event_type == "received":
+    @staticmethod
+    def _history_sort_key(item: dict[str, Any]) -> tuple[int, int]:
+        height = int(item.get("height", 0) or 0)
+        # Unconfirmed transactions are the newest useful debug signal. Otherwise
+        # the highest confirmed block height is the best Electrum history gives us
+        # without requiring an external block-time lookup for every transaction.
+        if height <= 0:
+            return (1, 0)
+        return (0, height)
+
+    async def notify_latest_transaction_for_wallet(
+        self,
+        wallet: dict[str, Any],
+        *,
+        scan_limit: int | None = None,
+        debug_logger: Any | None = None,
+    ) -> WalletEvent:
+        """Send a real ntfy notification for the latest tx seen in one wallet.
+
+        This deliberately uses the same derivation, Electrum/Fulcrum history,
+        optional Mempool enrichment, and ntfy formatting as the daemon path. It is
+        a one shot diagnostic path and does not save a wallet_event row, so it
+        cannot mask a later live notification.
+        """
+
+        async def ignore_notifications(message: dict[str, Any]) -> None:
+            if debug_logger is not None:
+                debug_logger(f"ignored Electrum notification during latest-tx debug: {message}")
+
+        def debug(message: str) -> None:
+            if debug_logger is not None:
+                debug_logger(message)
+
+        listener_task: asyncio.Task | None = None
+        await self.db.connect()
+        try:
+            await self.tor_upstream.start()
+            await self.client.connect()
+            listener_task = asyncio.create_task(self.client.listen(ignore_notifications))
+
+            lookahead = int(scan_limit or wallet.get("lookahead") or self.config["app"].get("lookahead", 100))
+            scripts = self._derive_wallet_scripts(wallet, lookahead=lookahead)
+            await self.db.upsert_watched_scripts(scripts)
+            debug(f"derived {len(scripts)} receive/change script(s) for wallet {wallet['name']!r}")
+
+            latest: tuple[tuple[int, int], dict[str, Any], Any] | None = None
+            for script in scripts:
+                history = await self.client.call("blockchain.scripthash.get_history", [script.scripthash])
+                debug(f"{script.path} {script.address}: {len(history)} history entr{'y' if len(history) == 1 else 'ies'}")
+                if not history:
+                    continue
+
+                watched = await self.db.get_watched_script(script.scripthash)
+                if watched is None:
+                    continue
+
+                for item in history:
+                    candidate = (self._history_sort_key(item), item, watched)
+                    if latest is None or candidate[0] > latest[0]:
+                        latest = candidate
+
+            if latest is None:
+                raise ValueError(
+                    f"No transaction history found for wallet {wallet['name']!r} within lookahead {lookahead}."
+                )
+
+            _, latest_item, watched = latest
+            txid = latest_item["tx_hash"]
+            height = int(latest_item.get("height", 0) or 0)
+            debug(f"latest transaction selected: txid={txid} height={height}")
+
+            event = await self._build_event(watched, txid, height)
+            await self._notify_activity(event, debug_latest=True)
+            return event
+        finally:
+            if listener_task is not None:
+                listener_task.cancel()
+                try:
+                    await listener_task
+                except asyncio.CancelledError:
+                    pass
+            await self.client.close()
+            await self.db.close()
+            await self.tor_upstream.stop()
+
+    async def _notify_activity(self, event: WalletEvent, *, debug_latest: bool = False) -> None:
+        if debug_latest:
+            title = f"Wallet Watchguard debug: latest tx for {event.wallet_name}"
+        elif event.event_type == "received":
             title = f"Bitcoin received: {event.wallet_name}"
         elif event.event_type == "sent":
             title = f"Bitcoin sent: {event.wallet_name}"
@@ -290,11 +435,16 @@ class Watcher:
             title = f"Bitcoin wallet activity: {event.wallet_name}"
 
         status = "unconfirmed/mempool" if event.status == "unconfirmed" else f"confirmed at height {event.height}"
-        lines = [
-            f"**Wallet:** {event.wallet_name}",
-            f"**Type:** {event.event_type}",
-            f"**Status:** {status}",
-        ]
+        lines = []
+        if debug_latest:
+            lines.append("**Debug:** latest transaction notification test")
+        lines.extend(
+            [
+                f"**Wallet:** {event.wallet_name}",
+                f"**Type:** {event.event_type}",
+                f"**Status:** {status}",
+            ]
+        )
 
         if event.amount_sats:
             sign = "+" if event.amount_sats > 0 else ""
