@@ -10,6 +10,9 @@ services:
       # Needed only for `wwg run`, not for `wwg init`.
       # Do not commit this. Prefer a local .env file outside git.
       WWG_PASSPHRASE: ${WWG_PASSPHRASE:-}
+      # Optional: set to true to enable the internal Tor upstream.
+      # You can also use tor.enabled: true in config.yaml.
+      WWG_TOR_UPSTREAM: ${WWG_TOR_UPSTREAM:-false}
     volumes:
       - ./data:/data
     command: ["wwg", "run", "--config", "/data/config.yaml"]

@@ -6,6 +6,7 @@ import re
 import shlex
 import time
 from dataclasses import dataclass
+from collections.abc import Callable
 from typing import Any
 
 from .crypto import decrypt_xpub_with_passphrase, metadata_from_config
@@ -38,11 +39,13 @@ class ConversationBridge:
         passphrase: str,
         electrum_client: ElectrumClient,
         notifier: NtfyNotifier,
+        status_provider: Callable[[], str] | None = None,
     ) -> None:
         self.config = config
         self.passphrase = passphrase
         self.electrum = electrum_client
         self.notifier = notifier
+        self.status_provider = status_provider
         self.settings = config.get("conversation") or {}
         self.command_prefix = str(self.settings.get("command_prefix", "wwg")).strip()
         self.max_addresses = int(self.settings.get("max_addresses_per_response", 10))
@@ -110,7 +113,7 @@ class ConversationBridge:
             flush=True,
         )
         print(
-            "Conversation commands: 'wwg help', 'wwg wallets', "
+            "Conversation commands: 'wwg help', 'wwg status', 'wwg wallets', "
             "'wwg next address', 'wwg next 3', 'wwg addresses --wallet-index 1 --limit 5', 'wwg fees'.",
             flush=True,
         )
@@ -159,7 +162,7 @@ class ConversationBridge:
                 return "help"
             if lowered.startswith(prefix + " "):
                 return text[len(self.command_prefix) :].strip()
-        natural_starts = ("help", "wallets", "next", "receive", "address", "addresses", "balance", "latest", "unused", "fees", "fee", "mempool fees")
+        natural_starts = ("help", "status", "wallets", "next", "receive", "address", "addresses", "balance", "latest", "unused", "fees", "fee", "mempool fees")
         if lowered.startswith(natural_starts):
             return text
         return None
@@ -169,6 +172,8 @@ class ConversationBridge:
         lowered = command.lower()
         if lowered in {"help", "?", "commands"}:
             return self._help_text()
+        if lowered in {"status", "show status", "system status"}:
+            return self._status_text()
         if lowered in {"wallets", "list wallets", "wallet list"}:
             return self._wallets_text()
         if lowered.startswith("addresses"):
@@ -184,6 +189,7 @@ class ConversationBridge:
             "Unknown Wallet Watchguard command.\n\n"
             "Try:\n"
             "`wwg help`\n"
+            "`wwg status`\n"
             "`wwg wallets`\n"
             "`wwg next address`\n"
             "`wwg next 3`\n"
@@ -195,6 +201,7 @@ class ConversationBridge:
         prefix = f"{self.command_prefix} " if self.command_prefix else ""
         return (
             "**Wallet Watchguard conversation commands**\n\n"
+            f"`{prefix}status` - show the same runtime summary printed at startup\n"
             f"`{prefix}wallets` - list configured wallets\n"
             f"`{prefix}next address` - return the next unused receive address\n"
             f"`{prefix}next 3` - return the next three unused receive addresses\n"
@@ -203,6 +210,11 @@ class ConversationBridge:
             f"`{prefix}balance` - show non-zero receive/change addresses across wallets\n"
             f"`{prefix}fees` - show local Mempool low/medium/high fee recommendations"
         )
+
+    def _status_text(self) -> str:
+        if self.status_provider is None:
+            return "Status is not available in this Conversation Mode context."
+        return self._truncate(self.status_provider().strip())
 
     def _wallets_text(self) -> str:
         wallets = self.config.get("wallets") or []

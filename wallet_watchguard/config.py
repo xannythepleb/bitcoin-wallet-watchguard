@@ -141,6 +141,16 @@ def validate_config(config: dict[str, Any]) -> None:
         if mempool.get("enabled") and not mempool.get("base_url"):
             raise ConfigError("mempool.enabled is true but mempool.base_url is blank")
 
+    tor = config.get("tor") or {}
+    if tor:
+        _validate_boolish(tor, "enabled", "tor")
+        _validate_boolish(tor, "manage_process", "tor")
+        _validate_boolish(tor, "test_on_startup", "tor")
+        if tor.get("enabled") and not str(tor.get("socks_proxy") or "").strip():
+            raise ConfigError("tor.enabled is true but tor.socks_proxy is blank")
+        if int(tor.get("startup_timeout_seconds", 60)) < 1:
+            raise ConfigError("tor.startup_timeout_seconds must be at least 1")
+
     conversation = config.get("conversation") or {}
     if conversation:
         _validate_boolish(conversation, "enabled", "conversation")
@@ -229,6 +239,14 @@ def default_config() -> dict[str, Any]:
                 "tls_verify": True,
                 "timeout_seconds": 15,
                 "enrich_notifications": True,
+            },
+            "tor": {
+                "enabled": False,
+                "socks_proxy": "127.0.0.1:9050",
+                "manage_process": True,
+                "startup_timeout_seconds": 60,
+                "test_on_startup": True,
+                "data_dir": "",
             },
             "conversation": {
                 "enabled": False,

@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import tomllib
-from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 from typing import Any
 
@@ -15,19 +13,8 @@ from .electrum import ElectrumClient
 from .mempool import MempoolClient, mempool_fee_rate, mempool_tx_status
 from .models import WalletEvent
 from .ntfy import NtfyNotifier, decrypt_conversation_ntfy_config, decrypt_ntfy_config
-
-
-def get_app_version() -> str:
-    try:
-        return package_version("wallet-watchguard")
-    except PackageNotFoundError:
-        pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
-        try:
-            with pyproject_path.open("rb") as handle:
-                data = tomllib.load(handle)
-            return str(data.get("project", {}).get("version", "unknown"))
-        except Exception:
-            return "unknown"
+from .status import build_status_text, format_server_version
+from .tor import TorUpstreamManager
 
 
 class Watcher:
@@ -35,6 +22,7 @@ class Watcher:
         self.config = config
         self.passphrase = passphrase
         self.config_path = str(config_path) if config_path is not None else "config.yaml"
+        self.tor_upstream = TorUpstreamManager(config)
         self.db = Database(config["app"]["database_path"])
         electrum = config["electrum"]
         self.client = ElectrumClient(
@@ -53,14 +41,21 @@ class Watcher:
         self._subscriptions_ready = asyncio.Event()
         self._subscription_count = 0
         self._conversation_started = False
+        self._tor_connectivity_result: str | None = None
 
     async def run(self) -> None:
-        await self.db.connect()
-        await self.client.connect()
-
-        listener = asyncio.create_task(self.client.listen(self._handle_notification))
+        listener: asyncio.Task | None = None
         conversation_task: asyncio.Task | None = None
+
+        await self.db.connect()
         try:
+            await self.tor_upstream.start()
+            await self.client.connect()
+            listener = asyncio.create_task(self.client.listen(self._handle_notification))
+
+            if self.tor_upstream.enabled and self.tor_upstream.config.test_on_startup:
+                await self._test_tor_connectivity()
+
             await self._derive_store_and_subscribe()
             self._subscriptions_ready.set()
 
@@ -70,6 +65,7 @@ class Watcher:
                     passphrase=self.passphrase,
                     electrum_client=self.client,
                     notifier=self.conversation_notifier,
+                    status_provider=self.status_text,
                 )
                 try:
                     await bridge.validate_or_raise()
@@ -86,7 +82,8 @@ class Watcher:
         finally:
             if conversation_task is not None:
                 conversation_task.cancel()
-            listener.cancel()
+            if listener is not None:
+                listener.cancel()
             if conversation_task is not None:
                 try:
                     await conversation_task
@@ -94,6 +91,7 @@ class Watcher:
                     pass
             await self.client.close()
             await self.db.close()
+            await self.tor_upstream.stop()
 
     async def _derive_store_and_subscribe(self) -> None:
         helper_path = self.config["app"].get("derivation_helper_path", "./wwg-derive")
@@ -140,81 +138,26 @@ class Watcher:
                 await self.client.call("blockchain.scripthash.subscribe", [script.scripthash])
                 self._subscription_count += 1
 
+    async def _test_tor_connectivity(self) -> None:
+        try:
+            result = await self.client.call("server.version", ["wallet-watchguard", "1.4"])
+            self._tor_connectivity_result = f"ok ({format_server_version(result)})"
+        except Exception as exc:
+            self._tor_connectivity_result = f"failed ({exc})"
+
+    def status_text(self) -> str:
+        return build_status_text(
+            self.config,
+            config_path=self.config_path,
+            ntfy_config=self.decrypted_ntfy_config,
+            conversation_ntfy_config=self.decrypted_conversation_ntfy_config,
+            subscription_count=self._subscription_count,
+            conversation_started=self._conversation_started,
+            tor_connectivity_result=self._tor_connectivity_result,
+        )
+
     def _print_startup_summary(self) -> None:
-        electrum = self.config["electrum"]
-        ntfy = self.config["ntfy"]
-        mempool_config = self.config.get("mempool") or {}
-
-        print("", flush=True)
-        version = get_app_version()
-        version_label = f"v{version}" if version != "unknown" and not version.startswith("v") else version
-
-        print(f"Bitcoin Wallet Watchguard {version_label} by xannythepleb is running", flush=True)
-        print("-------------------------------------", flush=True)
-        print(f"Version: {version_label}", flush=True)
-        print(f"Config: {self.config_path}", flush=True)
-        print(f"Database: {self.config['app']['database_path']}", flush=True)
-        print(
-            "Electrum/Fulcrum: "
-            f"{electrum['host']}:{electrum['port']} "
-            f"tls={bool(electrum.get('tls', True))} "
-            f"tls_verify={bool(electrum.get('tls_verify', True))}",
-            flush=True,
-        )
-        print(
-            f"ntfy: {ntfy['server'].rstrip('/')}/{ntfy['topic']} "
-            f"auth={(ntfy.get('auth') or {}).get('type', 'none')} "
-            f"tls_verify={bool(ntfy.get('tls_verify', True))}",
-            flush=True,
-        )
-        mempool_enabled = bool(getattr(self.mempool, "enabled", False))
-        mempool_base_url = str(getattr(self.mempool, "base_url", "") or mempool_config.get("base_url", ""))
-        mempool_tls_verify = bool(getattr(self.mempool, "tls_verify", mempool_config.get("tls_verify", True)))
-        mempool_enrich = bool(mempool_config.get("enrich_notifications", True))
-        if mempool_enabled:
-            print(
-                "Mempool API: enabled"
-                + (f" ({mempool_base_url})" if mempool_base_url else "")
-                + f" tls_verify={mempool_tls_verify} enrich_notifications={mempool_enrich}",
-                flush=True,
-            )
-        else:
-            print("Mempool API: disabled", flush=True)
-        conversation = self.config.get("conversation") or {}
-        requested = bool(conversation.get("enabled", False))
-        conversation_topic = self.decrypted_conversation_ntfy_config.get("topic", ntfy["topic"])
-        if self._conversation_started:
-            conversation_status = "enabled"
-            conversation_extra = f" on {self.decrypted_ntfy_config['server'].rstrip('/')}/{conversation_topic}"
-        elif requested:
-            conversation_status = "disabled"
-            conversation_extra = " (requested, but not running; check permission/protection messages above)"
-        else:
-            conversation_status = "disabled"
-            conversation_extra = ""
-        print(f"Conversation Mode: {conversation_status}{conversation_extra}", flush=True)
-        print(f"Subscribed scripts: {self._subscription_count}", flush=True)
-        print("", flush=True)
-        print("Wallets:", flush=True)
-        for wallet in self.config.get("wallets", []):
-            print(
-                "  - "
-                f"{wallet['name']} | {wallet['network']} | {wallet['wallet_type']} | "
-                f"lookahead={wallet.get('lookahead', self.config['app'].get('lookahead', 100))}",
-                flush=True,
-            )
-        print("", flush=True)
-        print("Useful commands:", flush=True)
-        print(f"  wwg test-ntfy", flush=True)
-        print(f"  wwg addresses --limit 20", flush=True)
-        print(f'  wwg addresses --wallet "<wallet name>" --limit 20', flush=True)
-        print(f"  wwg addresses --all --include-change --limit 20", flush=True)
-        print(f"  wwg balance", flush=True)
-        if mempool_enabled:
-            print(f"  wwg fees", flush=True)
-        if bool((self.config.get("conversation") or {}).get("enabled", False)):
-            print("  ntfy conversation: send 'wwg help' to the protected topic", flush=True)
-        print("", flush=True)
+        print(self.status_text(), flush=True)
 
     async def _handle_notification(self, message: dict[str, Any]) -> None:
         if message.get("method") != "blockchain.scripthash.subscribe":

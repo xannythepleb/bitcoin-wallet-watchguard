@@ -25,10 +25,12 @@ from .derivation import derive_addresses
 from .electrum import ElectrumClient, default_tls_verify_for_host
 from .mempool import MempoolClient, format_mempool_fee_summary
 from .ntfy import NtfyNotifier, decrypt_ntfy_config
+from .status import build_status_text, format_server_version
+from .tor import TorUpstreamManager, apply_tor_upstream, env_tor_upstream_enabled
 from .watcher import Watcher, get_passphrase_from_env_or_prompt
 
 
-INIT_SECTIONS = ["full", "electrum", "ntfy", "wallet", "app", "mempool", "conversation"]
+INIT_SECTIONS = ["full", "electrum", "ntfy", "wallet", "app", "mempool", "tor", "conversation"]
 
 # Docker Compose sets this to /data/config.yaml.
 # When running directly on the OS, the default remains ./config.yaml.
@@ -440,6 +442,28 @@ def _prompt_mempool_config(existing_mempool: dict | None = None) -> dict[str, ob
     }
 
 
+def _prompt_tor_config(existing_tor: dict | None = None) -> dict[str, object]:
+    existing_tor = existing_tor or {}
+
+    print()
+    print("Tor upstream")
+    print("Optional: start an internal Tor SOCKS proxy for Docker/Docker Compose runs.")
+    print("Use this when your Electrum/Fulcrum node is only reachable as a .onion service.")
+    print("This is OFF by default. Existing electrum.socks_proxy setups still work without this switch.")
+
+    enabled = _prompt_bool("Enable internal Tor upstream", bool(existing_tor.get("enabled", False)))
+    socks_proxy = _prompt("Internal Tor SOCKS proxy", str(existing_tor.get("socks_proxy") or "127.0.0.1:9050"))
+
+    return {
+        "enabled": enabled,
+        "socks_proxy": socks_proxy,
+        "manage_process": _prompt_bool("Let Wallet Watchguard start the Tor process", bool(existing_tor.get("manage_process", True))),
+        "startup_timeout_seconds": int(_prompt("Tor startup timeout seconds", str(existing_tor.get("startup_timeout_seconds", 60)))),
+        "test_on_startup": _prompt_bool("Test Tor connectivity on startup", bool(existing_tor.get("test_on_startup", True))),
+        "data_dir": _prompt("Tor data directory, blank for temporary", str(existing_tor.get("data_dir") or "")),
+    }
+
+
 def _prompt_conversation_config(
     passphrase: str,
     existing_conversation: dict | None = None,
@@ -626,6 +650,7 @@ def _apply_full_setup(config: dict, args: argparse.Namespace, *, existing_secret
     config["electrum"] = _prompt_electrum_config(config.get("electrum"))
     config["ntfy"] = _prompt_ntfy_config(passphrase, config.get("ntfy"))
     config["mempool"] = _prompt_mempool_config(config.get("mempool"))
+    config["tor"] = _prompt_tor_config(config.get("tor"))
     config["conversation"] = _prompt_conversation_config(passphrase, config.get("conversation"), config.get("ntfy"))
     config["wallets"] = [_prompt_wallet_config(passphrase)]
     return config
@@ -645,6 +670,10 @@ def _apply_section(config: dict, section: str, args: argparse.Namespace) -> dict
 
     if section == "mempool":
         config["mempool"] = _prompt_mempool_config(config.get("mempool"))
+        return config
+
+    if section == "tor":
+        config["tor"] = _prompt_tor_config(config.get("tor"))
         return config
 
     if section == "conversation":
@@ -691,9 +720,10 @@ def _choose_section_to_add() -> str:
             "3": "Add wallet xpub",
             "4": "Application settings",
             "5": "Optional Mempool API enrichment",
-            "6": "Conversation Mode",
-            "7": "Full setup wizard",
-            "8": "Cancel",
+            "6": "Tor upstream for onion Electrum/Fulcrum nodes",
+            "7": "Conversation Mode",
+            "8": "Full setup wizard",
+            "9": "Cancel",
         },
         default="1",
     )
@@ -706,9 +736,10 @@ def _section_from_menu_choice(choice: str) -> str | None:
         "3": "wallet",
         "4": "app",
         "5": "mempool",
-        "6": "conversation",
-        "7": "full",
-        "8": None,
+        "6": "tor",
+        "7": "conversation",
+        "8": "full",
+        "9": None,
     }[choice]
 
 
@@ -733,7 +764,9 @@ def _print_save_summary(config_path: Path, config: dict) -> None:
     print("  WWG_PASSPHRASE='your passphrase here' docker compose up -d")
     print()
     print("Useful checks:")
+    print(f"  wwg status --config {config_path}")
     print(f"  wwg test-ntfy --config {config_path}")
+    print(f"  wwg test-tor --config {config_path}")
     print(f"  wwg addresses --config {config_path} --limit 20")
 
 
@@ -776,14 +809,58 @@ def _derive_for_cli(config: dict, wallet: dict, passphrase: str, *, branch: int,
     )
 
 
+def _runtime_config(config: dict, args: argparse.Namespace) -> dict:
+    force_tor = bool(getattr(args, "tor_upstream", False)) or env_tor_upstream_enabled()
+    return apply_tor_upstream(config, force_enabled=force_tor)
+
+
+def _add_tor_upstream_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--tor-upstream",
+        action="store_true",
+        help="Enable Wallet Watchguard's internal Tor upstream for this command",
+    )
+
+
+
 async def _cmd_test_ntfy_async(config: dict, passphrase: str) -> None:
     notifier = NtfyNotifier(decrypt_ntfy_config(config["ntfy"], passphrase))
     await notifier.send(
-        "Wallet Watchguard test",
-        "Wallet Watchguard successfully published this test notification via ntfy.",
+        "Wallet Watchguard: Test Alert",
+        "Bitcoin Wallet Watchguard successfully published this test notification via ntfy.",
+        "This is free and open source software made by a fellow bitcoiner.",
+        "If you appreciate it, my Lightning address is xanny@cake.cash ⚡",
         priority="default",
         tags="white_check_mark,bitcoin",
     )
+
+
+async def _cmd_test_tor_async(config: dict) -> str:
+    tor_upstream = TorUpstreamManager(config)
+    if not tor_upstream.enabled:
+        raise ValueError("Tor upstream is disabled. Enable tor.enabled in config.yaml, set WWG_TOR_UPSTREAM=true, or pass --tor-upstream.")
+
+    client = _make_electrum_client(config)
+
+    async def ignore_notifications(message: dict) -> None:
+        _ = message
+
+    await tor_upstream.start()
+    listener_task: asyncio.Task | None = None
+    try:
+        await client.connect()
+        listener_task = asyncio.create_task(client.listen(ignore_notifications))
+        result = await client.call("server.version", ["wallet-watchguard", "1.4"])
+        return f"ok ({format_server_version(result)})"
+    finally:
+        if listener_task is not None:
+            listener_task.cancel()
+            try:
+                await listener_task
+            except asyncio.CancelledError:
+                pass
+        await client.close()
+        await tor_upstream.stop()
 
 
 def _wallet_label(wallet: dict, index: int) -> str:
@@ -1081,7 +1158,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(file=sys.stderr)
         return 2
 
-    config = load_config(config_path)
+    config = _runtime_config(load_config(config_path), args)
     if args.conversation:
         config.setdefault("conversation", {})["enabled"] = True
     passphrase = args.passphrase or get_passphrase_from_env_or_prompt()
@@ -1099,11 +1176,23 @@ def cmd_test_ntfy(args: argparse.Namespace) -> int:
 
 
 def cmd_addresses(args: argparse.Namespace) -> int:
-    config = load_config(args.config)
+    config = _runtime_config(load_config(args.config), args)
     passphrase = args.passphrase or get_passphrase_from_env_or_prompt()
     asyncio.run(_cmd_addresses_async(config, passphrase, args))
     return 0
 
+
+def cmd_status(args: argparse.Namespace) -> int:
+    config = _runtime_config(load_config(args.config), args)
+    print(build_status_text(config, config_path=args.config))
+    return 0
+
+
+def cmd_test_tor(args: argparse.Namespace) -> int:
+    config = _runtime_config(load_config(args.config), args)
+    result = asyncio.run(_cmd_test_tor_async(config))
+    print(f"Tor connectivity test: {result}")
+    return 0
 
 
 def cmd_fees(args: argparse.Namespace) -> int:
@@ -1122,7 +1211,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--add",
         choices=INIT_SECTIONS,
         default=None,
-        help="Jump directly to a setup section: full, electrum, ntfy, wallet, app, mempool, or Conversation Mode",
+        help="Jump directly to a setup section: full, electrum, ntfy, wallet, app, mempool, tor, or Conversation Mode",
     )
     p_init.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt")
     p_init.set_defaults(func=cmd_init)
@@ -1140,6 +1229,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable ntfy Conversation Mode for this run, subject to topic protection checks",
     )
+    _add_tor_upstream_arg(p_run)
     p_run.set_defaults(func=cmd_run)
 
     p_test = sub.add_parser("test-ntfy", help="Send a test ntfy notification using the configured credentials")
@@ -1162,7 +1252,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_addr.add_argument("--only-nonzero", action="store_true", help="Hide addresses with zero confirmed and unconfirmed balance")
     p_addr.add_argument("--only-used", action="store_true", help="Hide addresses with no Electrum history")
     p_addr.add_argument("--debug", action="store_true", help="Print derivation and Electrum query diagnostics to stderr")
+    _add_tor_upstream_arg(p_addr)
     p_addr.set_defaults(func=cmd_addresses)
+
+    p_status = sub.add_parser("status", help="Show Wallet Watchguard startup/status summary")
+    p_status.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    _add_tor_upstream_arg(p_status)
+    p_status.set_defaults(func=cmd_status)
+
+    p_test_tor = sub.add_parser("test-tor", help="Test the configured Tor upstream by querying Electrum/Fulcrum")
+    p_test_tor.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    _add_tor_upstream_arg(p_test_tor)
+    p_test_tor.set_defaults(func=cmd_test_tor)
 
     p_fees = sub.add_parser(
         "fees",

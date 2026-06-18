@@ -8,7 +8,7 @@ FROM python:3.12-slim-bookworm
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates tor \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=rust-builder /src/derivation-helper/target/release/wwg-derive /app/wwg-derive

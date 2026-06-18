@@ -100,6 +100,25 @@ conversation:
   max_addresses_per_response: 10
   max_response_chars: 3900
 
+# Optional: internal Tor upstream for Docker/Docker Compose builds.
+#
+# This is OFF by default. Enable it if electrum.host is a .onion address and
+# you want Wallet Watchguard to start its own Tor SOCKS proxy inside the
+# container. You can also enable it only for one run with:
+#   wwg run --tor-upstream
+# or in Docker Compose with:
+#   WWG_TOR_UPSTREAM=true docker compose up -d
+#
+# When enabled, Wallet Watchguard automatically uses tor.socks_proxy as the
+# Electrum/Fulcrum SOCKS proxy and runs a Tor connectivity probe on startup.
+tor:
+  enabled: false
+  socks_proxy: "127.0.0.1:9050"
+  manage_process: true
+  startup_timeout_seconds: 60
+  test_on_startup: true
+  data_dir: ""
+
 # Wallet entries are intentionally not shown as fake encrypted blobs here.
 #
 # Add an encrypted wallet with:
