@@ -120,7 +120,7 @@ wwg init --add ntfy
 
 Choose the Start9/StartOS provision publisher path.
 
-In the Start9 ntfy UI, use **Provision Publisher if you only want notifications and do not want Conversation Mode.** If you want Conversation Mode to work, follow the [Conversation Mode Setup][#conversation-mode-setup] instructions above to generate an access token through ntfy.
+In the Start9 ntfy UI, use **Provision Publisher if you only want notifications and do not want Conversation Mode.** If you want Conversation Mode to work, follow the [Conversation Mode Setup](#conversation-mode-setup) instructions above to generate an access token through ntfy.
 
 Note: you can always generate a new token and configure WWG to use it if you change your mind later.
 
