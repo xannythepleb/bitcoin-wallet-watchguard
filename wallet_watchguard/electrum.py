@@ -59,6 +59,7 @@ class ElectrumClient:
         self.writer: asyncio.StreamWriter | None = None
         self._next_id = 0
         self._pending: dict[int, asyncio.Future[Any]] = {}
+        self._notification_tasks: set[asyncio.Task[None]] = set()
 
     def _ssl_context(self) -> ssl.SSLContext | None:
         if not self.use_tls:
@@ -105,6 +106,15 @@ class ElectrumClient:
         )
 
     async def close(self) -> None:
+        # Notification handlers are deliberately dispatched as background tasks
+        # (see listen()). Cancel them before closing the socket so a handler that
+        # is waiting on call() cannot be left pending during shutdown.
+        for task in tuple(self._notification_tasks):
+            task.cancel()
+        if self._notification_tasks:
+            await asyncio.gather(*self._notification_tasks, return_exceptions=True)
+            self._notification_tasks.clear()
+
         if self.writer is not None:
             self.writer.close()
             await self.writer.wait_closed()
@@ -126,6 +136,26 @@ class ElectrumClient:
 
         return await asyncio.wait_for(fut, timeout=self.timeout_seconds)
 
+    def _track_notification_task(self, task: asyncio.Task[None]) -> None:
+        self._notification_tasks.add(task)
+
+        def done(completed: asyncio.Task[None]) -> None:
+            self._notification_tasks.discard(completed)
+            if completed.cancelled():
+                return
+            exc = completed.exception()
+            if exc is not None:
+                loop = asyncio.get_running_loop()
+                loop.call_exception_handler(
+                    {
+                        "message": "Unhandled Electrum notification handler exception",
+                        "exception": exc,
+                        "task": completed,
+                    }
+                )
+
+        task.add_done_callback(done)
+
     async def listen(self, handler: NotificationHandler) -> None:
         if self.reader is None:
             raise ElectrumError("Electrum client is not connected")
@@ -146,4 +176,11 @@ class ElectrumClient:
                 continue
 
             if "method" in message:
-                await handler(message)
+                # Do not await the notification handler in the socket reader loop.
+                # Wallet Watchguard's handler needs to issue follow-up Electrum
+                # calls such as blockchain.scripthash.get_history. Those call()
+                # futures are completed by this same listen() loop when it reads
+                # the server response, so awaiting the handler here deadlocks live
+                # subscription processing. Dispatching the handler lets the reader
+                # keep draining JSON-RPC responses and push notifications.
+                self._track_notification_task(asyncio.create_task(handler(message)))

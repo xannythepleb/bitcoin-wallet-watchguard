@@ -1059,6 +1059,34 @@ def _select_wallets_for_addresses(config: dict, args: argparse.Namespace) -> lis
         print(f"Please choose a number between 1 and {len(wallets)}, or 'all'.")
 
 
+def _select_one_wallet(config: dict, args: argparse.Namespace) -> dict:
+    selected = _select_wallets_for_addresses(config, args)
+    if len(selected) != 1:
+        raise ValueError("Choose exactly one wallet with --wallet or --wallet-index")
+    return selected[0]
+
+
+async def _cmd_notify_latest_tx_async(config: dict, passphrase: str, args: argparse.Namespace) -> None:
+    def debug(message: str) -> None:
+        if getattr(args, "debug", False):
+            print(f"debug: {message}", file=sys.stderr)
+
+    wallet = _select_one_wallet(config, args)
+    scan_limit = int(args.limit) if getattr(args, "limit", None) is not None else None
+    watcher = Watcher(config, passphrase, config_path=getattr(args, "config", None))
+    event = await watcher.notify_latest_transaction_for_wallet(
+        wallet,
+        scan_limit=scan_limit,
+        debug_logger=debug if getattr(args, "debug", False) else None,
+    )
+
+    amount = f" amount={event.amount_sats:+,} sats" if event.amount_sats else ""
+    print(
+        f"latest transaction debug notification sent for {event.wallet_name}: "
+        f"{event.txid} ({event.event_type}, {event.status}){amount}"
+    )
+
+
 async def _cmd_addresses_async(config: dict, passphrase: str, args: argparse.Namespace) -> None:
     electrum = config["electrum"]
     client = _make_electrum_client(config)
@@ -1348,8 +1376,14 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_test_ntfy(args: argparse.Namespace) -> int:
-    config = load_config_for_edit(args.config)
     passphrase = args.passphrase or get_passphrase_from_env_or_prompt()
+
+    if getattr(args, "latest_tx", False):
+        config = _runtime_config(load_config(args.config), args)
+        asyncio.run(_cmd_notify_latest_tx_async(config, passphrase, args))
+        return 0
+
+    config = load_config_for_edit(args.config)
     asyncio.run(_cmd_test_ntfy_async(config, passphrase))
     print("ntfy test message sent successfully.")
     return 0
@@ -1493,6 +1527,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_test = sub.add_parser("test-ntfy", help="Send a test ntfy notification using the configured credentials")
     p_test.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     p_test.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt/env")
+    p_test.add_argument(
+        "--latest-tx",
+        action="store_true",
+        help="Debug mode: notify with the latest transaction from a selected wallet",
+    )
+    p_test.add_argument("--wallet", default=None, help="Latest-tx debug: choose wallet by exact name or unique partial name")
+    p_test.add_argument("--wallet-index", type=int, default=None, help="Latest-tx debug: choose wallet by 1-based index")
+    p_test.add_argument("--limit", type=int, default=None, help="Latest-tx debug: addresses per branch to scan; defaults to wallet/app lookahead")
+    p_test.add_argument("--debug", action="store_true", help="Latest-tx debug: print derivation/history diagnostics to stderr")
+    _add_tor_upstream_arg(p_test)
     p_test.set_defaults(func=cmd_test_ntfy)
 
     p_addr = sub.add_parser(

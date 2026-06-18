@@ -136,6 +136,32 @@ class Database:
         cur = await self._conn().execute("SELECT * FROM watched_scripts WHERE scripthash = ?", (scripthash,))
         return await cur.fetchone()
 
+    async def get_scripthash_state(self, scripthash: str) -> dict[str, int | str | None]:
+        """Return the stored monitoring state for one watched script.
+
+        This is used during startup subscription baselining. If a script has no
+        stored status and no stored history, we treat the initial Electrum
+        subscription response as existing history rather than alerting the user
+        about every old transaction in a newly imported wallet.
+        """
+        conn = self._conn()
+        cur = await conn.execute(
+            """
+            SELECT
+                ws.last_status AS last_status,
+                COUNT(th.txid) AS history_count
+            FROM watched_scripts ws
+            LEFT JOIN tx_history th ON th.scripthash = ws.scripthash
+            WHERE ws.scripthash = ?
+            GROUP BY ws.scripthash, ws.last_status
+            """,
+            (scripthash,),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return {"last_status": None, "history_count": 0}
+        return {"last_status": row["last_status"], "history_count": int(row["history_count"] or 0)}
+
     async def get_watched_scripts_for_wallet(self, wallet_name: str) -> list[aiosqlite.Row]:
         cur = await self._conn().execute(
             "SELECT * FROM watched_scripts WHERE wallet_name = ? ORDER BY branch, address_index",
