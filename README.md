@@ -16,11 +16,11 @@ The existing view only wallet features via command line syntax are useful but I'
 
 ## First Time Setup
 
-Local:
+### Local
 
 ```bash
-wwg init --config config.yaml
-wwg run --config config.yaml
+wwg init
+wwg run
 ```
 
 ### Docker Compose
