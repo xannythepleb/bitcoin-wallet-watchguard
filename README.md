@@ -110,7 +110,7 @@ authenticated write: ok
 
 This means Wallet Watchguard has a write-only credential. Normal notifications will work, but Conversation Mode cannot receive commands. On Start9 this usually means you are still using a Provision Publisher token rather than a token created by a regular read-write user.
 
-### Start9 / StartOS Ntfy Setup
+## Start9 / StartOS Ntfy Setup
 
 If you use Start9/StartOS ntfy, run:
 
@@ -160,6 +160,45 @@ wwg init --add mempool
 TLS encryption still remains enabled; only public CA/hostname verification is skipped for that local self-hosted service.
 
 For existing configs without `electrum.tls_verify`, Wallet Watchguard automatically relaxes Electrum TLS verification for localhost, private IPs, `.local`, `.lan`, `.onion`, and similar local targets.
+
+## Tor Upstream for Onion Nodes
+
+Wallet Watchguard supports `.onion` Electrum/Fulcrum hosts through both external SOCKS proxies and, for Docker and Docker Compose deployments, you can now enable an internal Tor proxy so the container directly supports upstream Tor only Bitcoin nodes without any manual networking config required.
+
+This is off by default. Enable/disable it from the CLI:
+
+```bash
+wwg tor enable
+wwg tor disable
+wwg tor status
+```
+
+You can also enable it for a single session when launching WWG:
+
+```bash
+wwg run --tor-upstream
+wwg addresses --tor-upstream --limit 20
+```
+
+With Docker Compose, you can also enable it through an environment variable:
+
+```bash
+WWG_TOR_UPSTREAM=true WWG_PASSPHRASE='your passphrase here' docker compose up -d
+```
+
+When the switch is on, Wallet Watchguard automatically sets the effective Electrum SOCKS proxy to `tor.socks_proxy`. The startup summary and `wwg status` output include a multi-line `Tor Upstream` section showing whether it is enabled, which proxy is used, and whether Wallet Watchguard manages the Tor process. The Electrum/Fulcrum section shows the effective SOCKS proxy and, after a connectivity probe, the Electrum/Fulcrum server version.
+
+Test Tor connectivity manually with:
+
+```bash
+wwg test-tor
+```
+
+With Docker Compose:
+
+```bash
+WWG_TOR_UPSTREAM=true docker compose run --rm wallet-watchguard wwg test-tor
+```
 
 ## Ntfy Test Command
 
@@ -352,7 +391,7 @@ Bitcoin Wallet Watchguard uses:
 * Python for orchestration, CLI, async networking, config, SQLite, ntfy, and Mempool integration
 * Rust for exact Bitcoin address/script derivation
 * Fulcrum/Electrum for wallet activity subscriptions
-* SOCKS proxy support including an integrated Tor package in the Dockerfile for upstream connectivity to Tor only Bitcoin nodes
+* SOCKS proxy support, both external and internal (for Docker), for upstream connectivity to Tor only Bitcoin nodes
 * SQLite for local deduplication and state
 * Ntfy for self-hosted notifications and commands (effectively a self-hosted bot for your node)
 * Optional Mempool integration for richer transaction and fee data

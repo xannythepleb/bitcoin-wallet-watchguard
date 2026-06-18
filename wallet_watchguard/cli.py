@@ -25,7 +25,7 @@ from .derivation import derive_addresses
 from .electrum import ElectrumClient, default_tls_verify_for_host
 from .mempool import MempoolClient, format_mempool_fee_summary
 from .ntfy import NtfyNotifier, decrypt_ntfy_config
-from .status import build_status_text, format_server_version
+from .status import build_status_text, format_server_version, tor_upstream_lines
 from .tor import TorUpstreamManager, apply_tor_upstream, env_tor_upstream_enabled
 from .watcher import Watcher, get_passphrase_from_env_or_prompt
 
@@ -822,6 +822,56 @@ def _add_tor_upstream_arg(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _load_config_for_persistent_tor_edit(config_path: Path) -> dict:
+    if not config_path.exists():
+        _print_missing_config_help(config_path)
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+
+    if config_path.is_dir():
+        raise IsADirectoryError(f"Config path is a directory, not a file: {config_path}")
+
+    return load_config_for_edit(config_path)
+
+
+def _set_persistent_tor_enabled(config: dict, *, enabled: bool) -> dict:
+    default_tor = default_config().get("tor") or {}
+    existing_tor = config.get("tor") or {}
+    tor = {**default_tor, **existing_tor}
+    tor["enabled"] = enabled
+
+    # Keep user custom values, but repair missing/blank values so enabling Tor
+    # produces a runnable config even on older config.yaml files.
+    if not str(tor.get("socks_proxy") or "").strip():
+        tor["socks_proxy"] = default_tor.get("socks_proxy", "127.0.0.1:9050")
+    if int(tor.get("startup_timeout_seconds") or 0) < 1:
+        tor["startup_timeout_seconds"] = default_tor.get("startup_timeout_seconds", 60)
+
+    config["tor"] = tor
+    return config
+
+
+def _print_tor_config_summary(config_path: Path, config: dict) -> None:
+    print()
+    print(f"Tor upstream config: {config_path}")
+    for line in tor_upstream_lines(config):
+        print(line)
+
+    if env_tor_upstream_enabled():
+        print("Environment override: WWG_TOR_UPSTREAM=true is active for runtime commands")
+
+
+def _print_tor_next_steps(config_path: Path, *, enabled: bool) -> None:
+    print()
+    if enabled:
+        print("Next checks:")
+        print(f"  wwg tor status --config {config_path}")
+        print(f"  wwg test-tor --config {config_path}")
+        print(f"  wwg run --config {config_path}")
+    else:
+        print("Tor upstream is now disabled in config.yaml.")
+        print("Manual electrum.socks_proxy settings, if present, were left untouched.")
+
+
 
 async def _cmd_test_ntfy_async(config: dict, passphrase: str) -> None:
     notifier = NtfyNotifier(decrypt_ntfy_config(config["ntfy"], passphrase))
@@ -1195,6 +1245,37 @@ def cmd_test_tor(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_tor_enable(args: argparse.Namespace) -> int:
+    config_path = Path(args.config)
+    config = _load_config_for_persistent_tor_edit(config_path)
+    config = _set_persistent_tor_enabled(config, enabled=True)
+    save_config(config_path, config)
+
+    print(f"Internal Tor upstream enabled in {config_path}")
+    _print_tor_config_summary(config_path, config)
+    _print_tor_next_steps(config_path, enabled=True)
+    return 0
+
+
+def cmd_tor_disable(args: argparse.Namespace) -> int:
+    config_path = Path(args.config)
+    config = _load_config_for_persistent_tor_edit(config_path)
+    config = _set_persistent_tor_enabled(config, enabled=False)
+    save_config(config_path, config)
+
+    print(f"Internal Tor upstream disabled in {config_path}")
+    _print_tor_config_summary(config_path, config)
+    _print_tor_next_steps(config_path, enabled=False)
+    return 0
+
+
+def cmd_tor_status(args: argparse.Namespace) -> int:
+    config_path = Path(args.config)
+    config = _load_config_for_persistent_tor_edit(config_path)
+    _print_tor_config_summary(config_path, config)
+    return 0
+
+
 def cmd_fees(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     asyncio.run(_cmd_fees_async(config))
@@ -1264,6 +1345,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_test_tor.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     _add_tor_upstream_arg(p_test_tor)
     p_test_tor.set_defaults(func=cmd_test_tor)
+
+    p_tor = sub.add_parser("tor", help="Manage persistent internal Tor upstream settings")
+    tor_sub = p_tor.add_subparsers(dest="tor_command", required=True)
+
+    p_tor_enable = tor_sub.add_parser("enable", help="Persistently enable the internal Tor upstream in config.yaml")
+    p_tor_enable.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_tor_enable.set_defaults(func=cmd_tor_enable)
+
+    p_tor_disable = tor_sub.add_parser("disable", help="Persistently disable the internal Tor upstream in config.yaml")
+    p_tor_disable.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_tor_disable.set_defaults(func=cmd_tor_disable)
+
+    p_tor_status = tor_sub.add_parser("status", help="Show persistent internal Tor upstream settings")
+    p_tor_status.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_tor_status.set_defaults(func=cmd_tor_status)
 
     p_fees = sub.add_parser(
         "fees",

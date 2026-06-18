@@ -124,7 +124,7 @@ def build_status_text(
     """
     Build the startup/status text shown in the terminal and Conversation Mode.
 
-    tor_connectivity_result is kept as a backwards-compatible alias for earlier
+    tor_connectivity_result is kept as a backwards compatible alias for earlier
     call sites. New code should pass electrum_connectivity_result because the
     server.version result belongs to the Electrum/Fulcrum connection, not Tor.
     """
@@ -213,6 +213,7 @@ def build_status_text(
                 "  wwg status",
                 "  wwg test-ntfy",
                 "  wwg test-tor",
+                "  wwg tor status",
                 "  wwg addresses --limit 20",
                 "  wwg addresses --wallet \"<wallet name>\" --limit 20",
                 "  wwg addresses --all --include-change --limit 20",
