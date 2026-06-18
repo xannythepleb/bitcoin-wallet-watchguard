@@ -189,7 +189,7 @@ WWG_PASSPHRASE='your passphrase here' docker compose run --rm wallet-watchguard 
   wwg run --conversation
 ```
 
-Conversation mode will only start if the configured ntfy topic passes runtime protection checks:
+Conversation Mode will only start if the configured ntfy topic passes runtime protection checks:
 
 ```text
 configured token/basic credentials can read the topic
@@ -198,7 +198,9 @@ anonymous read is denied
 anonymous write is denied
 ```
 
-If the topic is public, or anonymous read/write is allowed, Wallet Watchguard will continue normal wallet monitoring but will not honour conversation mode.
+If the topic is public, or anonymous read/write is allowed, Wallet Watchguard will continue normal wallet monitoring but will not honour Conversation Mode.
+
+Conversation Mode performs an anonymous write probe on startup because ntfy's normal client APIs can publish, subscribe and authenticate, but do not expose a harmless per-topic ACL inspection endpoint for ordinary clients. The probe uses `Cache: no`, `Firebase: no` and minimum priority. If that anonymous probe succeeds, conversation Mode is refused.
 
 ### Conversation Commands
 
@@ -216,8 +218,6 @@ wwg fees
 ```
 
 The default command prefix is `wwg`. The prefix avoids accidental replies to unrelated messages on the same topic.
-
-Conversation mode performs an anonymous write probe on startup because ntfy's normal client APIs can publish, subscribe and authenticate, but do not expose a harmless per-topic ACL inspection endpoint for ordinary clients. The probe uses `Cache: no`, `Firebase: no` and minimum priority. If that anonymous probe succeeds, conversation mode is refused.
 
 ### Start9 / StartOS Conversation Mode Setup
 
