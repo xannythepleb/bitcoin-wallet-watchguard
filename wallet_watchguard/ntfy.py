@@ -75,6 +75,20 @@ class NtfyNotifier:
             )
         return httpx.Timeout(self.timeout_seconds)
 
+    @staticmethod
+    def _header_bytes(value: str) -> bytes:
+        """Encode an ntfy header value as UTF-8 bytes.
+
+        ntfy reads header values (Title, Tags, ...) as UTF-8, but HTTP clients
+        encode str header values as ASCII by default and reject anything outside
+        it. Handing httpx pre-encoded bytes makes it send them verbatim, so
+        titles and tags can contain emoji and other non-ASCII characters. CR/LF
+        are stripped to keep the request well-formed and to avoid header
+        injection via free-text fields such as wallet names.
+        """
+        cleaned = value.replace("\r", " ").replace("\n", " ")
+        return cleaned.encode("utf-8")
+
     async def send(
         self,
         title: str,
@@ -85,17 +99,18 @@ class NtfyNotifier:
         cache: bool = True,
         firebase: bool = True,
     ) -> None:
-        headers = {
-            "Title": title,
-            "Priority": priority or self.priority,
-            "Tags": tags or self.tags,
-            "Markdown": "yes",
+        headers: dict[str, bytes] = {
+            "Title": self._header_bytes(title),
+            "Priority": self._header_bytes(priority or self.priority),
+            "Tags": self._header_bytes(tags or self.tags),
+            "Markdown": b"yes",
         }
-        headers.update(self._auth_headers())
+        for key, value in self._auth_headers().items():
+            headers[key] = self._header_bytes(value)
         if not cache:
-            headers["Cache"] = "no"
+            headers["Cache"] = b"no"
         if not firebase:
-            headers["Firebase"] = "no"
+            headers["Firebase"] = b"no"
 
         async with httpx.AsyncClient(timeout=self._timeout(), verify=self.tls_verify) as client:
             response = await client.post(

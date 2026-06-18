@@ -9,6 +9,12 @@ import yaml
 from .crypto import SCHEME
 
 
+# Placeholder topic written into a brand new config. It is intentionally not a
+# usable topic: the setup wizard treats it as "no topic chosen yet" and never
+# shows it to the user.
+PLACEHOLDER_NTFY_TOPIC = "wallet-watchguard-replace-me"
+
+
 class ConfigError(ValueError):
     pass
 
@@ -224,7 +230,7 @@ def default_config() -> dict[str, Any]:
             },
             "ntfy": {
                 "server": "https://ntfy.example.com",
-                "topic": "wallet-watchguard-replace-me",
+                "topic": PLACEHOLDER_NTFY_TOPIC,
                 "auth": {
                     "type": "none",
                 },

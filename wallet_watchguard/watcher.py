@@ -35,8 +35,12 @@ class Watcher:
         )
         self.decrypted_ntfy_config = decrypt_ntfy_config(config["ntfy"], passphrase)
         self.notifier = NtfyNotifier(self.decrypted_ntfy_config)
-        self.decrypted_conversation_ntfy_config = decrypt_conversation_ntfy_config(config, passphrase)
-        self.conversation_notifier = NtfyNotifier(self.decrypted_conversation_ntfy_config)
+        # Conversation Mode credentials are decrypted lazily, only when
+        # Conversation Mode actually starts (see run()). A broken or partial
+        # separate conversation credential must not stop the wallet watcher
+        # daemon from booting and monitoring wallets.
+        self.decrypted_conversation_ntfy_config: dict[str, Any] | None = None
+        self.conversation_notifier: NtfyNotifier | None = None
         self.mempool = MempoolClient(config.get("mempool") or {})
         self._subscriptions_ready = asyncio.Event()
         self._subscription_count = 0
@@ -60,14 +64,18 @@ class Watcher:
             self._subscriptions_ready.set()
 
             if bool((self.config.get("conversation") or {}).get("enabled", False)):
-                bridge = ConversationBridge(
-                    config=self.config,
-                    passphrase=self.passphrase,
-                    electrum_client=self.client,
-                    notifier=self.conversation_notifier,
-                    status_provider=self.status_text,
-                )
                 try:
+                    self.decrypted_conversation_ntfy_config = decrypt_conversation_ntfy_config(
+                        self.config, self.passphrase
+                    )
+                    self.conversation_notifier = NtfyNotifier(self.decrypted_conversation_ntfy_config)
+                    bridge = ConversationBridge(
+                        config=self.config,
+                        passphrase=self.passphrase,
+                        electrum_client=self.client,
+                        notifier=self.conversation_notifier,
+                        status_provider=self.status_text,
+                    )
                     await bridge.validate_or_raise()
                     conversation_task = asyncio.create_task(bridge.run())
                     self._conversation_started = True
@@ -75,6 +83,16 @@ class Watcher:
                     self._conversation_started = False
                     print("", flush=True)
                     print(str(exc), flush=True)
+                    print("Wallet Watchguard will continue monitoring wallets, but Conversation Mode is disabled.", flush=True)
+                except Exception as exc:
+                    # A bad/partial conversation credential, missing config key, or
+                    # similar should disable Conversation Mode, not take the whole
+                    # daemon down. Wallet monitoring is the priority.
+                    self._conversation_started = False
+                    self.decrypted_conversation_ntfy_config = None
+                    self.conversation_notifier = None
+                    print("", flush=True)
+                    print(f"Conversation Mode could not start: {exc}", flush=True)
                     print("Wallet Watchguard will continue monitoring wallets, but Conversation Mode is disabled.", flush=True)
 
             self._print_startup_summary()
