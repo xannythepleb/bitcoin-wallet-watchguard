@@ -504,6 +504,8 @@ class Watcher:
         if event.fee_rate_sat_vb is not None:
             lines.append(f"**Fee rate:** `{event.fee_rate_sat_vb:.2f} sat/vB`")
 
+        if not event.tx_inputs and not event.tx_outputs and event.address:
+            lines.append(f"**Address:** `{event.address}`")
         if event.tx_inputs:
             lines.append("**Inputs:**\n" + self._format_tx_io_list(event.tx_inputs))
         if event.tx_outputs:
