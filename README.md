@@ -14,6 +14,58 @@ The current iteration of this tool is only scratching the surface of its potenti
 
 The existing view only wallet features via command line syntax are useful but I'm already working on more big updates to this because it fills a genuine gap in my own setup. This will get a lot cooler very quickly.
 
+## Conversation Mode: Talk to Your Wallet Anywhere
+
+Conversation Mode lets you query Wallet Watchguard remotely through ntfy. You can keep an eye on even your hardware cold storage wherever you are via 100% self-hosted infrastructure. No third party middleman if you configure it correctly with your own node and your own ntfy instance. You can run both of these on your own physical hardware using Start9 or Umbrel for true sovereignty.
+
+I specifically added this feature because I had a hard time finding a reliable watch only wallet that could work with any hardware wallet and allowed you to use your own node on the backend. So I made one. And because ntfy runs on Android, iOS, and in the browser, it is truly universal.
+
+It is off by default and checks are in place to ensure it is only enabled on secure sessions (password protected, no public read/write access).
+
+Enable it in config:
+
+```bash
+wwg init --add conversation
+```
+
+Or enable it for a single daemon run:
+
+```bash
+WWG_PASSPHRASE='your passphrase here' docker compose run --rm wallet-watchguard \
+  wwg run --conversation
+```
+
+Conversation Mode will only start if the configured ntfy topic passes runtime protection checks:
+
+```text
+configured token/basic credentials can read the topic
+configured token/basic credentials can publish to the topic
+anonymous read is denied
+anonymous write is denied
+```
+
+If the topic is public, or anonymous read/write is allowed, Wallet Watchguard will continue normal wallet monitoring but will not honour Conversation Mode.
+
+Conversation Mode performs an anonymous write probe on startup because ntfy's normal client APIs can publish, subscribe and authenticate, but do not expose a harmless per-topic ACL inspection endpoint for ordinary clients. The probe uses `Cache: no`, `Firebase: no` and minimum priority. If that anonymous probe succeeds, conversation Mode is refused.
+
+### Conversation Commands
+
+Example ntfy commands:
+
+```text
+wwg help
+wwg status
+wwg wallets
+wwg next address
+wwg next 3
+wwg addresses --wallet-index 1 --limit 5
+wwg addresses --wallet "Main Taproot wallet" --include-change --only-used
+wwg balance
+wwg fees
+```
+
+The default command prefix is `wwg`. The prefix avoids accidental replies to unrelated messages on the same topic.
+
 ## First Time Setup
 
 ### Local
@@ -261,58 +313,6 @@ wwg addresses --only-used --include-change --limit 100
 ```
 
 The address table includes a `used`/`unused` status column. Unused receive addresses are shown by default, even when their balance is zero.
-
-## Conversation Mode: Talk to Your Wallet Anywhere
-
-Conversation Mode lets you query Wallet Watchguard remotely through ntfy. You can keep an eye on even your hardware cold storage wherever you are via 100% self-hosted infrastructure. No third party middleman if you configure it correctly with your own node and your own ntfy instance. You can run both of these on your own physical hardware using Start9 or Umbrel for true sovereignty.
-
-I specifically added this feature because I had a hard time finding a reliable watch only wallet that could work with any hardware wallet and allowed you to use your own node on the backend. So I made one. And because ntfy runs on Android, iOS, and in the browser, it is truly universal.
-
-It is off by default and checks are in place to ensure it is only enabled on secure sessions (password protected, no public read/write access).
-
-Enable it in config:
-
-```bash
-wwg init --add conversation
-```
-
-Or enable it for a single daemon run:
-
-```bash
-WWG_PASSPHRASE='your passphrase here' docker compose run --rm wallet-watchguard \
-  wwg run --conversation
-```
-
-Conversation Mode will only start if the configured ntfy topic passes runtime protection checks:
-
-```text
-configured token/basic credentials can read the topic
-configured token/basic credentials can publish to the topic
-anonymous read is denied
-anonymous write is denied
-```
-
-If the topic is public, or anonymous read/write is allowed, Wallet Watchguard will continue normal wallet monitoring but will not honour Conversation Mode.
-
-Conversation Mode performs an anonymous write probe on startup because ntfy's normal client APIs can publish, subscribe and authenticate, but do not expose a harmless per-topic ACL inspection endpoint for ordinary clients. The probe uses `Cache: no`, `Firebase: no` and minimum priority. If that anonymous probe succeeds, conversation Mode is refused.
-
-### Conversation Commands
-
-Example ntfy commands:
-
-```text
-wwg help
-wwg status
-wwg wallets
-wwg next address
-wwg next 3
-wwg addresses --wallet-index 1 --limit 5
-wwg addresses --wallet "Main Taproot wallet" --include-change --only-used
-wwg balance
-wwg fees
-```
-
-The default command prefix is `wwg`. The prefix avoids accidental replies to unrelated messages on the same topic.
 
 ## Optional Mempool API Integration
 
