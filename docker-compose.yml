@@ -1,6 +1,6 @@
 services:
   wallet-watchguard:
-    build: .
+    image: ghcr.io/xannythepleb/bitcoin-wallet-watchguard:latest
     container_name: wallet-watchguard
     restart: unless-stopped
     environment:
