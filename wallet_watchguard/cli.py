@@ -11,7 +11,7 @@ from urllib.parse import urlparse, urlunparse
 
 import yaml
 
-from .config import PLACEHOLDER_NTFY_TOPIC, default_config, load_config, load_config_for_edit, save_config
+from .config import DEFAULT_DATABASE_PATH, PLACEHOLDER_NTFY_TOPIC, default_config, load_config, load_config_for_edit, save_config
 from .crypto import (
     decrypt_xpub_with_passphrase,
     encrypt_string_with_passphrase,
@@ -178,7 +178,7 @@ def _prompt_app_config(existing_app: dict | None = None) -> dict[str, object]:
 
     return {
         "name": existing_app.get("name", "Bitcoin Wallet Watchguard"),
-        "database_path": _prompt("SQLite database path", str(existing_app.get("database_path", "./watchguard.sqlite3"))),
+        "database_path": _prompt("SQLite database path", str(existing_app.get("database_path", DEFAULT_DATABASE_PATH))),
         "derivation_helper_path": _prompt(
             "Rust derivation helper path",
             str(existing_app.get("derivation_helper_path", "./wwg-derive")),
@@ -825,6 +825,10 @@ def _section_from_menu_choice(choice: str) -> str | None:
 def _print_save_summary(config_path: Path, config: dict) -> None:
     print()
     print(f"Wrote config to {config_path}")
+    print()
+    print("Restart WWG after wallet or config changes so the running watcher picks them up:")
+    print("  docker compose restart wallet-watchguard")
+    print("If you run WWG locally, stop and start your `wwg run` process instead.")
 
     if not config.get("wallets"):
         print()
@@ -890,7 +894,13 @@ def _derive_for_cli(config: dict, wallet: dict, passphrase: str, *, branch: int,
 
 def _runtime_config(config: dict, args: argparse.Namespace) -> dict:
     force_tor = bool(getattr(args, "tor_upstream", False)) or env_tor_upstream_enabled()
-    return apply_tor_upstream(config, force_enabled=force_tor)
+    config = apply_tor_upstream(config, force_enabled=force_tor)
+
+    if bool(getattr(args, "no_emoji", False)):
+        # Runtime-only display flag. It is deliberately not written back to config.yaml.
+        config.setdefault("app", {})["_display_emoji"] = False
+
+    return config
 
 
 def _add_tor_upstream_arg(parser: argparse.ArgumentParser) -> None:
@@ -1521,6 +1531,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable ntfy Conversation Mode for this run, subject to topic protection checks",
     )
+    p_run.add_argument("--no-emoji", action="store_true", help="Disable emoji in startup/status output")
     _add_tor_upstream_arg(p_run)
     p_run.set_defaults(func=cmd_run)
 
@@ -1559,6 +1570,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_status = sub.add_parser("status", help="Show Wallet Watchguard startup/status summary")
     p_status.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_status.add_argument("--no-emoji", action="store_true", help="Disable emoji in status output")
     _add_tor_upstream_arg(p_status)
     p_status.set_defaults(func=cmd_status)
 

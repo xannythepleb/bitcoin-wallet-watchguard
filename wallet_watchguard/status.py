@@ -31,6 +31,17 @@ def _format_bool(value: bool) -> str:
     return "true" if value else "false"
 
 
+def _label(text: str, emoji: str, *, use_emoji: bool) -> str:
+    return f"{emoji} {text}" if use_emoji else text
+
+
+def _status_use_emoji(config: dict[str, Any], use_emoji: bool | None) -> bool:
+    if use_emoji is not None:
+        return bool(use_emoji)
+    app_config = config.get("app") or {}
+    return bool(app_config.get("_display_emoji", True))
+
+
 def _split_connectivity_result(result: str) -> tuple[str, str | None]:
     """
     Split a compact connectivity result into a status and optional detail.
@@ -69,12 +80,13 @@ def electrum_upstream_lines(
     config: dict[str, Any],
     *,
     electrum_connectivity_result: str | None = None,
+    use_emoji: bool = True,
 ) -> list[str]:
     electrum = config["electrum"]
     socks_proxy = _effective_socks_proxy(config)
 
     lines = [
-        "Electrum/Fulcrum:",
+        _label("Electrum/Fulcrum:", "📡", use_emoji=use_emoji),
         f"  Server: {electrum['host']}:{electrum['port']}",
         f"  TLS: {_format_bool(bool(electrum.get('tls', True)))}",
         f"  TLS verify: {_format_bool(bool(electrum.get('tls_verify', True)))}",
@@ -91,22 +103,22 @@ def electrum_upstream_lines(
     return lines
 
 
-def tor_upstream_lines(config: dict[str, Any]) -> list[str]:
+def tor_upstream_lines(config: dict[str, Any], *, use_emoji: bool = True) -> list[str]:
     tor_cfg = tor_config_from_app_config(config)
 
     if tor_cfg.enabled:
         return [
-            "Tor Upstream: enabled",
+            _label("Tor Upstream: enabled", "🌐", use_emoji=use_emoji),
             f"  Proxy: {tor_cfg.socks_proxy}",
             f"  Managed process: {_format_bool(tor_cfg.manage_process)}",
             f"  Test on startup: {_format_bool(tor_cfg.test_on_startup)}",
         ]
 
-    return ["Tor Upstream: disabled"]
+    return [_label("Tor Upstream: disabled", "🌐", use_emoji=use_emoji)]
 
 
-def tor_upstream_line(config: dict[str, Any]) -> str:
-    return "\n".join(tor_upstream_lines(config))
+def tor_upstream_line(config: dict[str, Any], *, use_emoji: bool = True) -> str:
+    return "\n".join(tor_upstream_lines(config, use_emoji=use_emoji))
 
 
 def build_status_text(
@@ -120,6 +132,7 @@ def build_status_text(
     electrum_connectivity_result: str | None = None,
     tor_connectivity_result: str | None = None,
     include_useful_commands: bool = True,
+    use_emoji: bool | None = None,
 ) -> str:
     """
     Build the startup/status text shown in the terminal and Conversation Mode.
@@ -131,6 +144,8 @@ def build_status_text(
     if electrum_connectivity_result is None and tor_connectivity_result is not None:
         electrum_connectivity_result = tor_connectivity_result
 
+    use_emoji = _status_use_emoji(config, use_emoji)
+
     ntfy = ntfy_config or config["ntfy"]
     mempool_config = config.get("mempool") or {}
     conversation = config.get("conversation") or {}
@@ -138,25 +153,28 @@ def build_status_text(
     version = get_app_version()
     version_label = f"v{version}" if version != "unknown" and not version.startswith("v") else version
 
+    lightning_contact = "⚡ xanny@cake.cash" if use_emoji else "xanny@cake.cash"
+
     lines: list[str] = [
         "",
-        f"Bitcoin Wallet Watchguard {version_label} by xannythepleb is running",
+        f"Bitcoin Wallet Watchguard {version_label} by xannythepleb ({lightning_contact}) is running",
         "-------------------------------------",
-        f"Version: {version_label}",
-        f"Config: {config_path}",
-        f"Database: {config['app']['database_path']}",
+        f"{_label('Version:', '📦', use_emoji=use_emoji)} {version_label}",
+        f"{_label('Config:', '⚙️', use_emoji=use_emoji)} {config_path}",
+        f"{_label('Database:', '💾', use_emoji=use_emoji)} {config['app']['database_path']}",
     ]
 
     lines.extend(
         electrum_upstream_lines(
             config,
             electrum_connectivity_result=electrum_connectivity_result,
+            use_emoji=use_emoji,
         )
     )
-    lines.extend(tor_upstream_lines(config))
+    lines.extend(tor_upstream_lines(config, use_emoji=use_emoji))
 
     lines.append(
-        f"ntfy: {str(ntfy['server']).rstrip('/')}/{ntfy['topic']} "
+        f"{_label('ntfy:', '🔔', use_emoji=use_emoji)} {str(ntfy['server']).rstrip('/')}/{ntfy['topic']} "
         f"auth={(ntfy.get('auth') or {}).get('type', 'none')} "
         f"tls_verify={_format_bool(bool(ntfy.get('tls_verify', True)))}"
     )
@@ -167,13 +185,13 @@ def build_status_text(
     mempool_enrich = bool(mempool_config.get("enrich_notifications", True))
     if mempool_enabled:
         lines.append(
-            "Mempool API: enabled"
+            _label("Mempool API: enabled", "🌊", use_emoji=use_emoji)
             + (f" ({mempool_base_url})" if mempool_base_url else "")
             + f" tls_verify={_format_bool(mempool_tls_verify)}"
             + f" enrich_notifications={_format_bool(mempool_enrich)}"
         )
     else:
-        lines.append("Mempool API: disabled")
+        lines.append(_label("Mempool API: disabled", "🌊", use_emoji=use_emoji))
 
     requested = bool(conversation.get("enabled", False))
     conversation_topic = (conversation_ntfy_config or {}).get("topic") or ntfy.get("topic")
@@ -190,14 +208,14 @@ def build_status_text(
     else:
         conversation_status = "disabled"
         conversation_extra = ""
-    lines.append(f"Conversation Mode: {conversation_status}{conversation_extra}")
+    lines.append(f"{_label('Conversation Mode:', '🗣️', use_emoji=use_emoji)} {conversation_status}{conversation_extra}")
 
     if subscription_count is None:
-        lines.append("Subscribed scripts: not connected in this status command")
+        lines.append(_label("Subscribed scripts: not connected in this status command", "📜", use_emoji=use_emoji))
     else:
-        lines.append(f"Subscribed scripts: {subscription_count}")
+        lines.append(f"{_label('Subscribed scripts:', '📜', use_emoji=use_emoji)} {subscription_count}")
 
-    lines.extend(["", "Wallets:"])
+    lines.extend(["", _label("Wallets:", "💵", use_emoji=use_emoji)])
     for wallet in config.get("wallets", []):
         lines.append(
             "  - "
@@ -209,7 +227,7 @@ def build_status_text(
         lines.extend(
             [
                 "",
-                "Useful commands:",
+                _label("Useful commands:", "🚀", use_emoji=use_emoji),
                 "  wwg status",
                 "  wwg wallets",
                 "  wwg balance",
