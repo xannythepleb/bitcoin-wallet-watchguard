@@ -4,7 +4,7 @@ COPY derivation-helper/Cargo.toml derivation-helper/Cargo.lock* ./
 COPY derivation-helper/src ./src
 RUN rustc --version && cargo --version && cargo build --release
 
-FROM python:3.12-slim-bookworm
+FROM python:3.12-slim-trixie
 WORKDIR /app
 
 RUN apt-get update \
