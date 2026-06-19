@@ -32,7 +32,8 @@ def _format_bool(value: bool) -> str:
 
 
 def _label(text: str, emoji: str, *, use_emoji: bool) -> str:
-    return f"{emoji} {text}" if use_emoji else text
+    # Use two spaces after emoji labels, looks bad otherwise
+    return f"{emoji}  {text}" if use_emoji else text
 
 
 def _status_use_emoji(config: dict[str, Any], use_emoji: bool | None) -> bool:
@@ -160,7 +161,7 @@ def build_status_text(
         f"Bitcoin Wallet Watchguard {version_label} by xannythepleb ({lightning_contact}) is running",
         "-------------------------------------",
         f"{_label('Version:', '📦', use_emoji=use_emoji)} {version_label}",
-        f"{_label('Config:', '⚙️', use_emoji=use_emoji)} {config_path}",
+        f"{_label('Config:', '⚙️ ', use_emoji=use_emoji)} {config_path}",
         f"{_label('Database:', '💾', use_emoji=use_emoji)} {config['app']['database_path']}",
     ]
 
@@ -208,7 +209,7 @@ def build_status_text(
     else:
         conversation_status = "disabled"
         conversation_extra = ""
-    lines.append(f"{_label('Conversation Mode:', '🗣️', use_emoji=use_emoji)} {conversation_status}{conversation_extra}")
+    lines.append(f"{_label('Conversation Mode:', '🗣️ ', use_emoji=use_emoji)} {conversation_status}{conversation_extra}")
 
     if subscription_count is None:
         lines.append(_label("Subscribed scripts: not connected in this status command", "📜", use_emoji=use_emoji))
