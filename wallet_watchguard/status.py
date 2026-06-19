@@ -87,10 +87,10 @@ def electrum_upstream_lines(
 
     lines = [
         _label("Electrum/Fulcrum:", "📡", use_emoji=use_emoji),
-        f"   Server: {electrum['host']}:{electrum['port']}",
-        f"   TLS: {_format_bool(bool(electrum.get('tls', True)))}",
-        f"   TLS verify: {_format_bool(bool(electrum.get('tls_verify', True)))}",
-        f"   SOCKS proxy: {socks_proxy or 'none'}",
+        f"   - Server: {electrum['host']}:{electrum['port']}",
+        f"   - TLS: {_format_bool(bool(electrum.get('tls', True)))}",
+        f"   - TLS verify: {_format_bool(bool(electrum.get('tls_verify', True)))}",
+        f"   - SOCKS proxy: {socks_proxy or 'none'}",
     ]
 
     if electrum_connectivity_result:
