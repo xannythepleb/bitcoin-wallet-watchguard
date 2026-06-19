@@ -1,11 +1,8 @@
 name: Build and publish Docker image
 
-on:
-  push:
-    tags:
-      - "v*.*.*"
-      - "v*.*"
-      - "v*"
+"on":
+  release:
+    types: [published]
 
 concurrency:
   group: docker-${{ github.ref }}
@@ -25,9 +22,7 @@ jobs:
     name: Build and publish
     runs-on: ubuntu-latest
 
-    # Push events are already filtered to v* tags above.
-    # Release events are filtered here so non-version releases do not publish images.
-    if: github.event_name == 'push' || startsWith(github.event.release.tag_name, 'v')
+    if: ${{ startsWith(github.event.release.tag_name, 'v') }}
 
     steps:
       - name: Check out repository
@@ -56,11 +51,14 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest
             type=ref,event=tag
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=sha-
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.description=Bitcoin Wallet Watchguard: Talk to your Bitcoin node via Electrum and Ntfy
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
@@ -69,8 +67,8 @@ jobs:
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          pull: true
           tags: ${{ steps.meta.outputs.tags }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          labels: ${{ steps.meta.outputs.labels }}
           provenance: true
           sbom: true
