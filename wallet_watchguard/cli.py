@@ -1106,6 +1106,91 @@ def _remove_wallet_from_config(config: dict, wallet_name: str) -> int:
     return removed_count
 
 
+def _empty_wallet_stats(wallet_name: str) -> dict[str, int | str | None]:
+    return {
+        "wallet_name": wallet_name,
+        "watched_scripts": 0,
+        "used_scripts": 0,
+        "transactions": 0,
+        "history_entries": 0,
+        "utxos": 0,
+        "unspent_utxos": 0,
+        "unspent_sats": 0,
+        "wallet_events": 0,
+        "latest_event_at": None,
+    }
+
+
+async def _load_wallet_stats_async(database_path: Path) -> list[dict[str, int | str | None]]:
+    if not database_path.exists():
+        return []
+
+    db = Database(database_path)
+    await db.connect()
+    try:
+        return await db.get_wallet_stats()
+    finally:
+        await db.close()
+
+
+def _wallet_stats_with_config_wallets(
+    config: dict,
+    rows: list[dict[str, int | str | None]],
+) -> list[dict[str, int | str | None]]:
+    stats_by_name = {str(row["wallet_name"]): row for row in rows}
+
+    for wallet in config.get("wallets") or []:
+        wallet_name = str(wallet.get("name") or "").strip()
+        if wallet_name:
+            stats_by_name.setdefault(wallet_name, _empty_wallet_stats(wallet_name))
+
+    return sorted(stats_by_name.values(), key=lambda row: str(row["wallet_name"]).lower())
+
+
+def _format_optional_text(value: object) -> str:
+    text = "" if value is None else str(value).strip()
+    return text or "-"
+
+
+def _print_wallet_stats(database_path: Path, rows: list[dict[str, int | str | None]]) -> None:
+    print(f"Database: {database_path}")
+
+    if not rows:
+        print("No wallet statistics found yet.")
+        return
+
+    wallet_width = max(24, min(48, max(len(str(row["wallet_name"])) for row in rows)))
+    header = (
+        f"{'wallet':<{wallet_width}} "
+        f"{'scripts':>8} "
+        f"{'used':>8} "
+        f"{'txs':>8} "
+        f"{'events':>8} "
+        f"{'utxos':>8} "
+        f"{'live':>8} "
+        f"{'live sats':>14} "
+        f"latest event"
+    )
+    print(header)
+    print("-" * len(header))
+
+    for row in rows:
+        wallet_name = str(row["wallet_name"])
+        if len(wallet_name) > wallet_width:
+            wallet_name = f"{wallet_name[: wallet_width - 1]}…"
+
+        print(
+            f"{wallet_name:<{wallet_width}} "
+            f"{int(row['watched_scripts'] or 0):>8,} "
+            f"{int(row['used_scripts'] or 0):>8,} "
+            f"{int(row['transactions'] or 0):>8,} "
+            f"{int(row['wallet_events'] or 0):>8,} "
+            f"{int(row['utxos'] or 0):>8,} "
+            f"{int(row['unspent_utxos'] or 0):>8,} "
+            f"{int(row['unspent_sats'] or 0):>14,} "
+            f"{_format_optional_text(row['latest_event_at'])}"
+        )
+
 
 
 async def _cmd_notify_latest_tx_async(config: dict, passphrase: str, args: argparse.Namespace) -> None:
@@ -1444,6 +1529,15 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_stats(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    database_path = _database_path_from_config(config)
+    rows = asyncio.run(_load_wallet_stats_async(database_path))
+    rows = _wallet_stats_with_config_wallets(config, rows)
+    _print_wallet_stats(database_path, rows)
+    return 0
+
+
 def cmd_wallets(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     wallets = config.get("wallets") or []
@@ -1627,6 +1721,10 @@ def build_parser() -> argparse.ArgumentParser:
     _add_tor_upstream_arg(p_status)
     p_status.set_defaults(func=cmd_status)
 
+    p_stats = sub.add_parser("stats", help="Show wallet statistics from the SQLite database")
+    p_stats.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_stats.set_defaults(func=cmd_stats)
+
     p_wallets = sub.add_parser(
         "wallets",
         aliases=["list-wallets"],
@@ -1646,7 +1744,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Wallet name, or a unique partial name",
     )
     p_wallet_remove.add_argument("--config", default=DEFAULT_CONFIG_PATH)
-    p_wallet_remove.add_argument("--wallet-index", type=int, default=None, help="Remove wallet by its numerical index in config")
+    p_wallet_remove.add_argument("--wallet-index", type=int, default=None, help="Remove wallet by its index in config")
     p_wallet_remove.set_defaults(func=cmd_wallet_remove)
 
     p_next = sub.add_parser(

@@ -169,6 +169,86 @@ class Database:
         )
         return list(await cur.fetchall())
 
+    async def get_wallet_stats(self) -> list[dict[str, int | str | None]]:
+        conn = self._conn()
+        cur = await conn.execute(
+            """
+            WITH wallet_names AS (
+                SELECT wallet_name FROM watched_scripts
+                UNION
+                SELECT wallet_name FROM utxos
+                UNION
+                SELECT wallet_name FROM wallet_events
+            ),
+            script_stats AS (
+                SELECT
+                    wallet_name,
+                    COUNT(*) AS watched_scripts,
+                    SUM(CASE WHEN used != 0 THEN 1 ELSE 0 END) AS used_scripts
+                FROM watched_scripts
+                GROUP BY wallet_name
+            ),
+            tx_stats AS (
+                SELECT
+                    ws.wallet_name,
+                    COUNT(DISTINCT th.txid) AS transactions,
+                    COUNT(th.txid) AS history_entries
+                FROM watched_scripts ws
+                JOIN tx_history th ON th.scripthash = ws.scripthash
+                GROUP BY ws.wallet_name
+            ),
+            utxo_stats AS (
+                SELECT
+                    wallet_name,
+                    COUNT(*) AS utxos,
+                    SUM(CASE WHEN spent_by_txid IS NULL THEN 1 ELSE 0 END) AS unspent_utxos,
+                    SUM(CASE WHEN spent_by_txid IS NULL THEN value_sats ELSE 0 END) AS unspent_sats
+                FROM utxos
+                GROUP BY wallet_name
+            ),
+            event_stats AS (
+                SELECT
+                    wallet_name,
+                    COUNT(*) AS wallet_events,
+                    MAX(created_at) AS latest_event_at
+                FROM wallet_events
+                GROUP BY wallet_name
+            )
+            SELECT
+                wn.wallet_name,
+                COALESCE(ss.watched_scripts, 0) AS watched_scripts,
+                COALESCE(ss.used_scripts, 0) AS used_scripts,
+                COALESCE(ts.transactions, 0) AS transactions,
+                COALESCE(ts.history_entries, 0) AS history_entries,
+                COALESCE(us.utxos, 0) AS utxos,
+                COALESCE(us.unspent_utxos, 0) AS unspent_utxos,
+                COALESCE(us.unspent_sats, 0) AS unspent_sats,
+                COALESCE(es.wallet_events, 0) AS wallet_events,
+                es.latest_event_at AS latest_event_at
+            FROM wallet_names wn
+            LEFT JOIN script_stats ss ON ss.wallet_name = wn.wallet_name
+            LEFT JOIN tx_stats ts ON ts.wallet_name = wn.wallet_name
+            LEFT JOIN utxo_stats us ON us.wallet_name = wn.wallet_name
+            LEFT JOIN event_stats es ON es.wallet_name = wn.wallet_name
+            ORDER BY LOWER(wn.wallet_name)
+            """
+        )
+        rows = await cur.fetchall()
+        return [
+            {
+                "wallet_name": row["wallet_name"],
+                "watched_scripts": int(row["watched_scripts"] or 0),
+                "used_scripts": int(row["used_scripts"] or 0),
+                "transactions": int(row["transactions"] or 0),
+                "history_entries": int(row["history_entries"] or 0),
+                "utxos": int(row["utxos"] or 0),
+                "unspent_utxos": int(row["unspent_utxos"] or 0),
+                "unspent_sats": int(row["unspent_sats"] or 0),
+                "wallet_events": int(row["wallet_events"] or 0),
+                "latest_event_at": row["latest_event_at"],
+            }
+            for row in rows
+        ]
 
     async def delete_wallet(self, wallet_name: str) -> dict[str, int]:
         conn = self._conn()
