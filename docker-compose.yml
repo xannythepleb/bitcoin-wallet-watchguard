@@ -1,6 +1,7 @@
 services:
   wallet-watchguard:
     image: ghcr.io/xannythepleb/bitcoin-wallet-watchguard:latest
+    user: "${WWG_UID:-1000}:${WWG_GID:-1000}"
     container_name: wallet-watchguard
     restart: unless-stopped
     environment:

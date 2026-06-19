@@ -91,7 +91,7 @@ class ElectrumClient:
             self.reader, self.writer = await asyncio.open_connection(
                 sock=sock,
                 ssl=ssl_context,
-                server_hostname=self.host if self.use_tls and self.tls_verify else None,
+                server_hostname=self.host if self.use_tls else None,
             )
             return
 

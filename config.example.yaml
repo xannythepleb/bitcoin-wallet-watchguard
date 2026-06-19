@@ -119,7 +119,14 @@ tor:
   manage_process: true
   startup_timeout_seconds: 60
   test_on_startup: true
-  data_dir: ""
+  # Optional.
+  # Leave as null to use temporary runtime storage.
+  # This is recommended for Docker and normal client-only Tor use.
+  #
+  # Set this only if you specifically want Tor state to persist between runs.
+  # Example for local/non-Docker use:
+  # data_dir: "./data/tor"
+  data_dir: null
 
 # Wallet entries are intentionally not shown as fake encrypted blobs here.
 #
