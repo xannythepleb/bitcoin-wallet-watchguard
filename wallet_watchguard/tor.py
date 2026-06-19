@@ -58,13 +58,17 @@ def parse_socks_host_port(socks_proxy: str) -> tuple[str, int]:
 
 def tor_config_from_app_config(config: dict[str, Any], *, force_enabled: bool = False) -> TorUpstreamConfig:
     tor = config.get("tor") or {}
+
+    env_data_dir = os.environ.get("WWG_TOR_DATA_DIR", "").strip()
+    configured_data_dir = str(tor.get("data_dir") or "").strip()
+
     return TorUpstreamConfig(
         enabled=bool(tor.get("enabled", False)) or force_enabled,
         socks_proxy=str(tor.get("socks_proxy") or "127.0.0.1:9050"),
         manage_process=bool(tor.get("manage_process", True)),
         startup_timeout_seconds=int(tor.get("startup_timeout_seconds", 60)),
         test_on_startup=bool(tor.get("test_on_startup", True)),
-        data_dir=str(tor.get("data_dir") or "").strip() or None,
+        data_dir=env_data_dir or configured_data_dir or None,
     )
 
 
@@ -156,17 +160,25 @@ class TorUpstreamManager:
 
     def _prepare_data_dir(self) -> Path:
         if self.config.data_dir:
-            data_dir = Path(self.config.data_dir)
+            data_dir = Path(self.config.data_dir).expanduser()
             data_dir.mkdir(parents=True, exist_ok=True)
         else:
             self._temp_data_dir = tempfile.TemporaryDirectory(prefix="wwg-tor-")
             data_dir = Path(self._temp_data_dir.name)
 
-        # Tor is deliberately picky about private key directory permissions.
         try:
             data_dir.chmod(0o700)
-        except PermissionError:
-            pass
+        except PermissionError as exc:
+            raise RuntimeError(
+                f"Cannot set Tor data directory permissions on {data_dir}. "
+                "Make sure this path is owned by the user running Wallet Watchguard."
+            ) from exc
+
+        if not os.access(data_dir, os.R_OK | os.W_OK | os.X_OK):
+            raise RuntimeError(
+                f"Tor data directory is not usable by the current user: {data_dir}. "
+                "It must be readable, writable, and searchable by the Wallet Watchguard process."
+            )
 
         self._data_dir_path = data_dir
         return data_dir
