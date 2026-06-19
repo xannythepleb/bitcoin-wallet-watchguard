@@ -95,9 +95,25 @@ jobs:
           TRIVY_USERNAME: ${{ github.actor }}
           TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Resolve default branch SHA
+        id: default_branch
+        shell: bash
+        run: |
+          branch="${{ github.event.repository.default_branch }}"
+          sha="$(git ls-remote origin "refs/heads/${branch}" | cut -f1)"
+
+          echo "branch=${branch}" >> "${GITHUB_OUTPUT}"
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+
+          echo "Default branch: ${branch}"
+          echo "Default branch SHA: ${sha}"
+          echo "Release SHA: ${{ github.sha }}"
+
       - name: Upload Trivy image results to GitHub Code Scanning
         uses: github/codeql-action/upload-sarif@v4
         if: ${{ always() && hashFiles('trivy-image-results.sarif') != '' }}
         with:
           sarif_file: trivy-image-results.sarif
           category: trivy-image
+          ref: refs/heads/${{ steps.default_branch.outputs.branch }}
+          sha: ${{ steps.default_branch.outputs.sha }}

@@ -1,22 +1,21 @@
 name: Trivy Repo Scan
 
 on:
-workflow_dispatch:
-schedule:
-# 4:20am Saturday
-# I love this website https://crontab.guru/#20_4_*_*_6
-- cron: "20 4 * * 6"
+  workflow_dispatch:
+  schedule:
+  # 4:20am Saturday
+  # I love this website https://crontab.guru/#20_4_*_*_6
+    - cron: "20 4 * * 6"
 
 permissions:
-contents: read
-security-events: write
+  contents: read
+  security-events: write
 
 jobs:
-trivy-repo-scan:
-name: Trivy repository scan
-runs-on: ubuntu-24.04
+  trivy-repo-scan:
+    name: Trivy repository scan
+    runs-on: ubuntu-24.04
 
-```
 steps:
   - name: Check out repository
     uses: actions/checkout@v4
