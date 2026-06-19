@@ -1,13 +1,13 @@
-name: Build Docker image for docker-no-root branch
+name: Build Docker image for test branch
 
 on:
   push:
     branches:
-      - docker-no-root
+      - "**"
   workflow_dispatch:
 
 concurrency:
-  group: docker-no-root-${{ github.ref }}
+  group: docker-test-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -19,16 +19,31 @@ env:
 
 jobs:
   docker:
-    name: Build docker-no-root image
+    name: Build test Docker image
     runs-on: ubuntu-latest
+
+    if: ${{ github.event_name == 'workflow_dispatch' || github.ref_name == vars.DOCKER_TEST_BRANCH }}
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
       - name: Set lowercase image name
+        shell: bash
         run: |
           echo "IMAGE_NAME=${REGISTRY}/${GITHUB_REPOSITORY,,}" >> "${GITHUB_ENV}"
+
+      - name: Set safe test tag
+        id: test_tag
+        shell: bash
+        run: |
+          branch="${GITHUB_REF_NAME}"
+          safe_branch="$(printf '%s' "${branch}" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed -E 's/[^a-z0-9_.-]+/-/g; s/^-+//; s/-+$//')"
+
+          echo "safe_branch=${safe_branch}" >> "${GITHUB_OUTPUT}"
+          echo "Using test image tag suffix: ${safe_branch}"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -49,8 +64,8 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=docker-no-root
-            type=sha,prefix=docker-no-root-sha-
+            type=raw,value=test-${{ steps.test_tag.outputs.safe_branch }}
+            type=sha,prefix=test-${{ steps.test_tag.outputs.safe_branch }}-sha-
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
