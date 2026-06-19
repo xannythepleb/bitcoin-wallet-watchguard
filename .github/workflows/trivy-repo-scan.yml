@@ -1,0 +1,43 @@
+name: Trivy Repo Scan
+
+on:
+workflow_dispatch:
+schedule:
+# 4:20am Saturday
+# I love this website https://crontab.guru/#20_4_*_*_6
+- cron: "20 4 * * 6"
+
+permissions:
+contents: read
+security-events: write
+
+jobs:
+trivy-repo-scan:
+name: Trivy repository scan
+runs-on: ubuntu-24.04
+
+```
+steps:
+  - name: Check out repository
+    uses: actions/checkout@v4
+
+  - name: Run Trivy filesystem scan
+    uses: aquasecurity/trivy-action@v0.36.0
+    with:
+      scan-type: fs
+      scan-ref: .
+      scanners: vuln,secret,misconfig
+      vuln-type: os,library
+      severity: CRITICAL,HIGH
+      ignore-unfixed: true
+      hide-progress: true
+      format: sarif
+      output: trivy-repo-results.sarif
+      exit-code: "0"
+
+  - name: Upload Trivy results to GitHub Code Scanning
+    uses: github/codeql-action/upload-sarif@v4
+    if: always()
+    with:
+      sarif_file: trivy-repo-results.sarif
+      category: trivy-repo

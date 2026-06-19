@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
-import os
 import secrets
 import sys
 from pathlib import Path
@@ -11,7 +10,7 @@ from urllib.parse import urlparse, urlunparse
 
 import yaml
 
-from .config import PLACEHOLDER_NTFY_TOPIC, default_config, load_config, load_config_for_edit, save_config
+from .config import DEFAULT_CONFIG_PATH, DEFAULT_DATABASE_PATH, PLACEHOLDER_NTFY_TOPIC, default_config, load_config, load_config_for_edit, save_config
 from .crypto import (
     decrypt_xpub_with_passphrase,
     encrypt_string_with_passphrase,
@@ -22,6 +21,7 @@ from .crypto import (
     prompt_new_passphrase,
 )
 from .derivation import derive_addresses
+from .db import Database
 from .electrum import ElectrumClient, default_tls_verify_for_host
 from .mempool import MempoolClient, format_mempool_fee_summary
 from .ntfy import NtfyNotifier, decrypt_ntfy_config
@@ -31,12 +31,6 @@ from .watcher import Watcher, get_passphrase_from_env_or_prompt
 
 
 INIT_SECTIONS = ["full", "electrum", "ntfy", "wallet", "app", "mempool", "tor", "conversation"]
-
-# Docker Compose sets this to /data/config.yaml.
-# When running directly on the OS, the default remains ./config.yaml.
-# Explicit --config always overrides this value.
-DEFAULT_CONFIG_PATH = os.environ.get("WWG_CONFIG_PATH", "./config.yaml")
-
 
 def _prompt(label: str, default: str | None = None, *, display_default: str | None = None) -> str:
     # display_default lets us show a friendly hint (e.g. "not yet set") while
@@ -178,7 +172,7 @@ def _prompt_app_config(existing_app: dict | None = None) -> dict[str, object]:
 
     return {
         "name": existing_app.get("name", "Bitcoin Wallet Watchguard"),
-        "database_path": _prompt("SQLite database path", str(existing_app.get("database_path", "./watchguard.sqlite3"))),
+        "database_path": _prompt("SQLite database path", str(existing_app.get("database_path", DEFAULT_DATABASE_PATH))),
         "derivation_helper_path": _prompt(
             "Rust derivation helper path",
             str(existing_app.get("derivation_helper_path", "./wwg-derive")),
@@ -825,6 +819,10 @@ def _section_from_menu_choice(choice: str) -> str | None:
 def _print_save_summary(config_path: Path, config: dict) -> None:
     print()
     print(f"Wrote config to {config_path}")
+    print()
+    print("Restart WWG after wallet or config changes so the running watcher picks them up:")
+    print("  docker compose restart wallet-watchguard")
+    print("If you run WWG locally, stop and start your `wwg run` process instead.")
 
     if not config.get("wallets"):
         print()
@@ -890,7 +888,13 @@ def _derive_for_cli(config: dict, wallet: dict, passphrase: str, *, branch: int,
 
 def _runtime_config(config: dict, args: argparse.Namespace) -> dict:
     force_tor = bool(getattr(args, "tor_upstream", False)) or env_tor_upstream_enabled()
-    return apply_tor_upstream(config, force_enabled=force_tor)
+    config = apply_tor_upstream(config, force_enabled=force_tor)
+
+    if bool(getattr(args, "no_emoji", False)):
+        # Runtime-only display flag. It is deliberately not written back to config.yaml.
+        config.setdefault("app", {})["_display_emoji"] = False
+
+    return config
 
 
 def _add_tor_upstream_arg(parser: argparse.ArgumentParser) -> None:
@@ -1064,6 +1068,122 @@ def _select_one_wallet(config: dict, args: argparse.Namespace) -> dict:
     if len(selected) != 1:
         raise ValueError("Choose exactly one wallet with --wallet or --wallet-index")
     return selected[0]
+
+
+def _database_path_from_config(config: dict) -> Path:
+    return Path(str((config.get("app") or {}).get("database_path") or DEFAULT_DATABASE_PATH))
+
+
+async def _purge_wallet_from_database_async(database_path: Path, wallet_name: str) -> dict[str, int]:
+    if not database_path.exists():
+        return {
+            "watched_scripts": 0,
+            "tx_history": 0,
+            "utxos": 0,
+            "wallet_events": 0,
+        }
+
+    db = Database(database_path)
+    await db.connect()
+    try:
+        return await db.delete_wallet(wallet_name)
+    finally:
+        await db.close()
+
+
+def _remove_wallet_from_config(config: dict, wallet_name: str) -> int:
+    wallets = config.get("wallets") or []
+    remaining_wallets = [wallet for wallet in wallets if wallet.get("name") != wallet_name]
+    removed_count = len(wallets) - len(remaining_wallets)
+    config["wallets"] = remaining_wallets
+    return removed_count
+
+
+def _empty_wallet_stats(wallet_name: str) -> dict[str, int | str | None]:
+    return {
+        "wallet_name": wallet_name,
+        "watched_scripts": 0,
+        "used_scripts": 0,
+        "transactions": 0,
+        "history_entries": 0,
+        "utxos": 0,
+        "unspent_utxos": 0,
+        "unspent_sats": 0,
+        "wallet_events": 0,
+        "latest_event_at": None,
+    }
+
+
+async def _load_wallet_stats_async(database_path: Path) -> list[dict[str, int | str | None]]:
+    if not database_path.exists():
+        return []
+
+    db = Database(database_path)
+    await db.connect()
+    try:
+        return await db.get_wallet_stats()
+    finally:
+        await db.close()
+
+
+def _wallet_stats_with_config_wallets(
+    config: dict,
+    rows: list[dict[str, int | str | None]],
+) -> list[dict[str, int | str | None]]:
+    stats_by_name = {str(row["wallet_name"]): row for row in rows}
+
+    for wallet in config.get("wallets") or []:
+        wallet_name = str(wallet.get("name") or "").strip()
+        if wallet_name:
+            stats_by_name.setdefault(wallet_name, _empty_wallet_stats(wallet_name))
+
+    return sorted(stats_by_name.values(), key=lambda row: str(row["wallet_name"]).lower())
+
+
+def _format_optional_text(value: object) -> str:
+    text = "" if value is None else str(value).strip()
+    return text or "-"
+
+
+def _print_wallet_stats(database_path: Path, rows: list[dict[str, int | str | None]]) -> None:
+    print(f"Database: {database_path}")
+
+    if not rows:
+        print("No wallet statistics found yet.")
+        return
+
+    wallet_width = max(24, min(48, max(len(str(row["wallet_name"])) for row in rows)))
+    header = (
+        f"{'wallet':<{wallet_width}} "
+        f"{'scripts':>8} "
+        f"{'used':>8} "
+        f"{'txs':>8} "
+        f"{'events':>8} "
+        f"{'utxos':>8} "
+        f"{'live':>8} "
+        f"{'live sats':>14} "
+        f"latest event"
+    )
+    print(header)
+    print("-" * len(header))
+
+    for row in rows:
+        wallet_name = str(row["wallet_name"])
+        if len(wallet_name) > wallet_width:
+            wallet_name = f"{wallet_name[: wallet_width - 1]}…"
+
+        print(
+            f"{wallet_name:<{wallet_width}} "
+            f"{int(row['watched_scripts'] or 0):>8,} "
+            f"{int(row['used_scripts'] or 0):>8,} "
+            f"{int(row['transactions'] or 0):>8,} "
+            f"{int(row['wallet_events'] or 0):>8,} "
+            f"{int(row['utxos'] or 0):>8,} "
+            f"{int(row['unspent_utxos'] or 0):>8,} "
+            f"{int(row['unspent_sats'] or 0):>14,} "
+            f"{_format_optional_text(row['latest_event_at'])}"
+        )
+
 
 
 async def _cmd_notify_latest_tx_async(config: dict, passphrase: str, args: argparse.Namespace) -> None:
@@ -1402,6 +1522,15 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_stats(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    database_path = _database_path_from_config(config)
+    rows = asyncio.run(_load_wallet_stats_async(database_path))
+    rows = _wallet_stats_with_config_wallets(config, rows)
+    _print_wallet_stats(database_path, rows)
+    return 0
+
+
 def cmd_wallets(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     wallets = config.get("wallets") or []
@@ -1413,6 +1542,27 @@ def cmd_wallets(args: argparse.Namespace) -> int:
     print("Configured wallets:")
     for index, wallet in enumerate(wallets):
         print(f"  {_wallet_label(wallet, index)}")
+    return 0
+
+
+def cmd_wallet_remove(args: argparse.Namespace) -> int:
+    config_path = Path(args.config)
+    config = load_config_for_edit(config_path)
+    wallet = _select_one_wallet(config, args)
+    wallet_name = str(wallet["name"])
+
+    removed_from_config = _remove_wallet_from_config(config, wallet_name)
+    database_path = _database_path_from_config(config)
+    deleted_rows = asyncio.run(_purge_wallet_from_database_async(database_path, wallet_name))
+
+    save_config(config_path, config)
+
+    print(f"Removed wallet from config: {wallet_name}")
+    if removed_from_config > 1:
+        print(f"Removed {removed_from_config} config entries with that wallet name.")
+    print(f"Removed database rows for wallet: {wallet_name}")
+    for table_name in ["watched_scripts", "tx_history", "utxos", "wallet_events"]:
+        print(f"  {table_name}: {deleted_rows.get(table_name, 0)}")
     return 0
 
 
@@ -1521,6 +1671,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable ntfy Conversation Mode for this run, subject to topic protection checks",
     )
+    p_run.add_argument("--no-emoji", action="store_true", help="Disable emoji in startup/status output")
     _add_tor_upstream_arg(p_run)
     p_run.set_defaults(func=cmd_run)
 
@@ -1559,8 +1710,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_status = sub.add_parser("status", help="Show Wallet Watchguard startup/status summary")
     p_status.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_status.add_argument("--no-emoji", action="store_true", help="Disable emoji in status output")
     _add_tor_upstream_arg(p_status)
     p_status.set_defaults(func=cmd_status)
+
+    p_stats = sub.add_parser("stats", help="Show wallet statistics from the SQLite database")
+    p_stats.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_stats.set_defaults(func=cmd_stats)
 
     p_wallets = sub.add_parser(
         "wallets",
@@ -1569,6 +1725,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_wallets.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     p_wallets.set_defaults(func=cmd_wallets)
+
+    p_wallet = sub.add_parser("wallet", help="Manage configured wallets")
+    wallet_sub = p_wallet.add_subparsers(dest="wallet_command", required=True)
+
+    p_wallet_remove = wallet_sub.add_parser("remove", help="Remove a wallet from config and database")
+    p_wallet_remove.add_argument(
+        "wallet",
+        nargs="?",
+        default=None,
+        help="Wallet name, or a unique partial name",
+    )
+    p_wallet_remove.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_wallet_remove.add_argument("--wallet-index", type=int, default=None, help="Remove wallet by its index in config")
+    p_wallet_remove.set_defaults(func=cmd_wallet_remove)
 
     p_next = sub.add_parser(
         "next",

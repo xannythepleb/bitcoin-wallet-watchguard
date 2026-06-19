@@ -1,6 +1,8 @@
 app:
   name: "Bitcoin Wallet Watchguard"
-  database_path: "/data/watchguard.sqlite3"
+  # Don't touch this unless you know what you are doing
+  database_path: "./data/watchguard.sqlite3"
+  # Same with this
   derivation_helper_path: "/usr/local/bin/wwg-derive"
   lookahead: 100
   notify_on_mempool: true

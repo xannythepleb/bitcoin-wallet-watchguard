@@ -14,6 +14,13 @@ from .crypto import SCHEME
 # shows it to the user.
 PLACEHOLDER_NTFY_TOPIC = "wallet-watchguard-replace-me"
 
+# Wallet Watchguard keeps its persistent local state under ./data by default.
+# This keeps config.yaml and the SQLite database together for both local and
+# Docker Compose users, assuming Compose mounts the project ./data directory.
+DEFAULT_DATA_DIR = "./data"
+DEFAULT_CONFIG_PATH = f"{DEFAULT_DATA_DIR}/config.yaml"
+DEFAULT_DATABASE_PATH = f"{DEFAULT_DATA_DIR}/watchguard.sqlite3"
+
 
 class ConfigError(ValueError):
     pass
@@ -214,7 +221,7 @@ def default_config() -> dict[str, Any]:
         {
             "app": {
                 "name": "Bitcoin Wallet Watchguard",
-                "database_path": "./watchguard.sqlite3",
+                "database_path": DEFAULT_DATABASE_PATH,
                 "derivation_helper_path": "./wwg-derive",
                 "lookahead": 100,
                 "notify_on_mempool": True,
