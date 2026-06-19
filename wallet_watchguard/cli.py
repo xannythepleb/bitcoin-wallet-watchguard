@@ -22,6 +22,7 @@ from .crypto import (
     prompt_new_passphrase,
 )
 from .derivation import derive_addresses
+from .db import Database
 from .electrum import ElectrumClient, default_tls_verify_for_host
 from .mempool import MempoolClient, format_mempool_fee_summary
 from .ntfy import NtfyNotifier, decrypt_ntfy_config
@@ -1076,6 +1077,37 @@ def _select_one_wallet(config: dict, args: argparse.Namespace) -> dict:
     return selected[0]
 
 
+def _database_path_from_config(config: dict) -> Path:
+    return Path(str((config.get("app") or {}).get("database_path") or DEFAULT_DATABASE_PATH))
+
+
+async def _purge_wallet_from_database_async(database_path: Path, wallet_name: str) -> dict[str, int]:
+    if not database_path.exists():
+        return {
+            "watched_scripts": 0,
+            "tx_history": 0,
+            "utxos": 0,
+            "wallet_events": 0,
+        }
+
+    db = Database(database_path)
+    await db.connect()
+    try:
+        return await db.delete_wallet(wallet_name)
+    finally:
+        await db.close()
+
+
+def _remove_wallet_from_config(config: dict, wallet_name: str) -> int:
+    wallets = config.get("wallets") or []
+    remaining_wallets = [wallet for wallet in wallets if wallet.get("name") != wallet_name]
+    removed_count = len(wallets) - len(remaining_wallets)
+    config["wallets"] = remaining_wallets
+    return removed_count
+
+
+
+
 async def _cmd_notify_latest_tx_async(config: dict, passphrase: str, args: argparse.Namespace) -> None:
     def debug(message: str) -> None:
         if getattr(args, "debug", False):
@@ -1426,6 +1458,27 @@ def cmd_wallets(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_wallet_remove(args: argparse.Namespace) -> int:
+    config_path = Path(args.config)
+    config = load_config_for_edit(config_path)
+    wallet = _select_one_wallet(config, args)
+    wallet_name = str(wallet["name"])
+
+    removed_from_config = _remove_wallet_from_config(config, wallet_name)
+    database_path = _database_path_from_config(config)
+    deleted_rows = asyncio.run(_purge_wallet_from_database_async(database_path, wallet_name))
+
+    save_config(config_path, config)
+
+    print(f"Removed wallet from config: {wallet_name}")
+    if removed_from_config > 1:
+        print(f"Removed {removed_from_config} config entries with that wallet name.")
+    print(f"Removed database rows for wallet: {wallet_name}")
+    for table_name in ["watched_scripts", "tx_history", "utxos", "wallet_events"]:
+        print(f"  {table_name}: {deleted_rows.get(table_name, 0)}")
+    return 0
+
+
 def cmd_next(args: argparse.Namespace) -> int:
     config = _runtime_config(load_config(args.config), args)
     passphrase = args.passphrase or get_passphrase_from_env_or_prompt()
@@ -1581,6 +1634,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_wallets.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     p_wallets.set_defaults(func=cmd_wallets)
+
+    p_wallet = sub.add_parser("wallet", help="Manage configured wallets")
+    wallet_sub = p_wallet.add_subparsers(dest="wallet_command", required=True)
+
+    p_wallet_remove = wallet_sub.add_parser("remove", help="Remove a wallet from config and database")
+    p_wallet_remove.add_argument(
+        "wallet",
+        nargs="?",
+        default=None,
+        help="Wallet name, or a unique partial name",
+    )
+    p_wallet_remove.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_wallet_remove.add_argument("--wallet-index", type=int, default=None, help="Remove wallet by its numerical index in config")
+    p_wallet_remove.set_defaults(func=cmd_wallet_remove)
 
     p_next = sub.add_parser(
         "next",

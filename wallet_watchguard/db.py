@@ -169,6 +169,40 @@ class Database:
         )
         return list(await cur.fetchall())
 
+
+    async def delete_wallet(self, wallet_name: str) -> dict[str, int]:
+        conn = self._conn()
+        deleted_rows = {
+            "watched_scripts": 0,
+            "tx_history": 0,
+            "utxos": 0,
+            "wallet_events": 0,
+        }
+
+        cur = await conn.execute(
+            "SELECT scripthash FROM watched_scripts WHERE wallet_name = ?",
+            (wallet_name,),
+        )
+        scripthashes = [row["scripthash"] for row in await cur.fetchall()]
+
+        if scripthashes:
+            placeholders = ", ".join("?" for _ in scripthashes)
+            cur = await conn.execute(
+                f"DELETE FROM tx_history WHERE scripthash IN ({placeholders})",
+                scripthashes,
+            )
+            deleted_rows["tx_history"] = max(int(cur.rowcount or 0), 0)
+
+        for table_name in ["utxos", "wallet_events", "watched_scripts"]:
+            cur = await conn.execute(
+                f"DELETE FROM {table_name} WHERE wallet_name = ?",
+                (wallet_name,),
+            )
+            deleted_rows[table_name] = max(int(cur.rowcount or 0), 0)
+
+        await conn.commit()
+        return deleted_rows
+
     async def remember_history(self, scripthash: str, history: list[dict]) -> list[dict]:
         """Store history rows and return only newly seen tx entries."""
         conn = self._conn()
