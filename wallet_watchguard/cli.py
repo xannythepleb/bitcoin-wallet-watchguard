@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
-import os
 import secrets
 import sys
 from pathlib import Path
@@ -11,7 +10,7 @@ from urllib.parse import urlparse, urlunparse
 
 import yaml
 
-from .config import DEFAULT_DATABASE_PATH, PLACEHOLDER_NTFY_TOPIC, default_config, load_config, load_config_for_edit, save_config
+from .config import DEFAULT_CONFIG_PATH, DEFAULT_DATABASE_PATH, PLACEHOLDER_NTFY_TOPIC, default_config, load_config, load_config_for_edit, save_config
 from .crypto import (
     decrypt_xpub_with_passphrase,
     encrypt_string_with_passphrase,
@@ -32,12 +31,6 @@ from .watcher import Watcher, get_passphrase_from_env_or_prompt
 
 
 INIT_SECTIONS = ["full", "electrum", "ntfy", "wallet", "app", "mempool", "tor", "conversation"]
-
-# Docker Compose sets this to /data/config.yaml.
-# When running directly on the OS, the default remains ./config.yaml.
-# Explicit --config always overrides this value.
-DEFAULT_CONFIG_PATH = os.environ.get("WWG_CONFIG_PATH", "./config.yaml")
-
 
 def _prompt(label: str, default: str | None = None, *, display_default: str | None = None) -> str:
     # display_default lets us show a friendly hint (e.g. "not yet set") while

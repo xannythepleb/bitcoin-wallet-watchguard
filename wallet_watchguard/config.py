@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -15,10 +14,12 @@ from .crypto import SCHEME
 # shows it to the user.
 PLACEHOLDER_NTFY_TOPIC = "wallet-watchguard-replace-me"
 
-# Docker Compose can set this to /data/watchguard.sqlite3.
-# When running directly on the OS, the default remains ./watchguard.sqlite3.
-# A value saved in config.yaml always overrides this default.
-DEFAULT_DATABASE_PATH = os.environ.get("WWG_DATABASE_PATH", "./watchguard.sqlite3")
+# Wallet Watchguard keeps its persistent local state under ./data by default.
+# This keeps config.yaml and the SQLite database together for both local and
+# Docker Compose users, assuming Compose mounts the project ./data directory.
+DEFAULT_DATA_DIR = "./data"
+DEFAULT_CONFIG_PATH = f"{DEFAULT_DATA_DIR}/config.yaml"
+DEFAULT_DATABASE_PATH = f"{DEFAULT_DATA_DIR}/watchguard.sqlite3"
 
 
 class ConfigError(ValueError):

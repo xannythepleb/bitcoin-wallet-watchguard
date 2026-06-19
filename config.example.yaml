@@ -1,10 +1,8 @@
 app:
   name: "Bitcoin Wallet Watchguard"
-  # Docker Compose users should use /data/watchguard.sqlite3
-  # Local/non-Docker users can keep ./watchguard.sqlite3
-  # WWG is designed to set itself up dynamically based on local vs Docker
   # Don't touch this unless you know what you are doing
-  database_path: "./watchguard.sqlite3"
+  database_path: "./data/watchguard.sqlite3"
+  # Same with this
   derivation_helper_path: "/usr/local/bin/wwg-derive"
   lookahead: 100
   notify_on_mempool: true
