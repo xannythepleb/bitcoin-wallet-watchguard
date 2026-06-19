@@ -110,9 +110,9 @@ def tor_upstream_lines(config: dict[str, Any], *, use_emoji: bool = True) -> lis
     if tor_cfg.enabled:
         return [
             _label("Tor Upstream: enabled", "🌐", use_emoji=use_emoji),
-            f"  Proxy: {tor_cfg.socks_proxy}",
-            f"  Managed process: {_format_bool(tor_cfg.manage_process)}",
-            f"  Test on startup: {_format_bool(tor_cfg.test_on_startup)}",
+            f"   - Proxy: {tor_cfg.socks_proxy}",
+            f"   - Managed process: {_format_bool(tor_cfg.manage_process)}",
+            f"   - Test on startup: {_format_bool(tor_cfg.test_on_startup)}",
         ]
 
     return [_label("Tor Upstream: disabled", "🌐", use_emoji=use_emoji)]
