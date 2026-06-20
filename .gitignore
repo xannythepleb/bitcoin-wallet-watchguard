@@ -8,3 +8,11 @@ config.yaml
 wwg-derive
 target/
 .git/
+*.egg-info/
+.eggs/
+build/
+dist/
+*.egg-info
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/

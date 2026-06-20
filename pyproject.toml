@@ -1,6 +1,6 @@
 [project]
 name = "wallet-watchguard"
-version = "0.1.8"
+version = "0.1.8-1"
 description = "Bitcoin Wallet Watchguard: Talk to your Bitcoin node via Electrum and Ntfy"
 requires-python = ">=3.12"
 dependencies = [
@@ -14,6 +14,10 @@ dependencies = [
 [project.scripts]
 wallet-watchguard = "wallet_watchguard.cli:main"
 wwg = "wallet_watchguard.cli:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]

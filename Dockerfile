@@ -1,3 +1,4 @@
+# Rust builder
 FROM rust:1-trixie AS rust-builder
 
 WORKDIR /src/derivation-helper
@@ -9,13 +10,19 @@ RUN rustc --version \
     && cargo --version \
     && cargo build --release
 
-
+# Python runner
 FROM python:3.12-slim-trixie
 
-WORKDIR /app
+# Pull in the uv binary from its official image
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=0 \
+    PATH="/app/.venv/bin:$PATH"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates tor \
@@ -29,10 +36,14 @@ COPY --from=rust-builder --chown=root:root --chmod=0755 \
     /src/derivation-helper/target/release/wwg-derive \
     /app/wwg-derive
 
-COPY pyproject.toml README.md ./
-COPY wallet_watchguard ./wallet_watchguard
+# 1) Dependencies only — this layer is cached unless uv.lock changes
+COPY pyproject.toml uv.lock ./
+RUN uv sync --locked --no-dev --no-install-project
 
-RUN pip install --no-cache-dir .
+# 2) Now the project itself
+COPY README.md ./
+COPY wallet_watchguard ./wallet_watchguard
+RUN uv sync --locked --no-dev
 
 USER wwg
 
