@@ -4,7 +4,7 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-      day: "monday"
+      day: "saturday"
       time: "04:20"
       timezone: "Europe/London"
     open-pull-requests-limit: 10
@@ -39,12 +39,11 @@ updates:
     #   semver-patch-days: 3
 
   # --- Rust helper ---
-  # IMPORTANT: point `directory` at wherever your Cargo.toml actually lives
   - package-ecosystem: "cargo"
-    directory: "/rust"          # e.g. "/", "/src/native", "/crates/helper"
+    directory: "/derivation-helper"
     schedule:
       interval: "weekly"
-      day: "monday"
+      day: "saturday"
     open-pull-requests-limit: 5
     commit-message:
       prefix: "deps(rust)"
@@ -65,7 +64,7 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-      day: "monday"
+      day: "saturday"
     commit-message:
       prefix: "ci"
     labels:

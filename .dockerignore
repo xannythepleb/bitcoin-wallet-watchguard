@@ -1,0 +1,30 @@
+# Version control
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+build/
+dist/
+
+# Rust build artifacts (the big one)
+target/
+derivation-helper/target/
+
+# Runtime data & secrets — never bake these into an image layer
+data/
+*.db
+*.sqlite
+*.sqlite3
+.env
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store

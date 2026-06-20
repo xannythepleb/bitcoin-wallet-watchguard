@@ -1,0 +1,37 @@
+name: Sync uv.lock
+
+on:
+  pull_request_target:
+    paths:
+      - "pyproject.toml"
+
+permissions:
+  contents: write
+
+jobs:
+  lock:
+    # Dependabot's own in-repo PRs only — never forks
+    if: >-
+      github.actor == 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the PR branch
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.LOCKFILE_PAT }} 
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Regenerate uv.lock
+        run: uv lock
+
+      - name: Commit if changed
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore(deps): sync uv.lock"
+          file_pattern: uv.lock
