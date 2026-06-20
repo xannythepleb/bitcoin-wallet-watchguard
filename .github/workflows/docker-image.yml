@@ -20,6 +20,15 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
+
+  verify-lock:
+    runs-on: ubuntu-latest
+    if: ${{ startsWith(github.event.release.tag_name, 'v') }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.1.0
+      - run: uv lock --check   # fails if uv.lock is out of sync with pyproject.toml
+
   docker:
     name: Build and publish
     runs-on: ubuntu-latest
@@ -95,6 +104,7 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v7
         id: build
+        needs: verify-lock
         with:
           context: .
           file: ./Dockerfile
