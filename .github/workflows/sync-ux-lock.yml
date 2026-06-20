@@ -20,7 +20,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           ref: ${{ github.head_ref }}
-          token: ${{ secrets.LOCKFILE_PAT }}   # NOT GITHUB_TOKEN — see below
+          token: ${{ secrets.LOCKFILE_PAT }} 
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
