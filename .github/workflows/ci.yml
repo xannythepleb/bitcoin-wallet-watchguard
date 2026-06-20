@@ -47,9 +47,20 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64        # single-arch for PR speed
+          platforms: linux/amd64
           push: false
           load: true
           tags: wallet-watchguard:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: wallet-watchguard:ci
+          scanners: vuln
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          hide-progress: true
+          format: table
+          exit-code: "1"        # fail the PR on a fixable CRITICAL/HIGH
