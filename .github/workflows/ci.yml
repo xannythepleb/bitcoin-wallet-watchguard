@@ -14,7 +14,7 @@ jobs:
         uses: astral-sh/setup-uv@v8.1.0
         with:
           enable-cache: true
-      - name: Sync dependencies
+      - name: Sync dependencies (uv lock sync with pyproject)
         run: uv sync --locked --all-extras
       - name: Lint
         run: uv run ruff check .
