@@ -1,16 +1,12 @@
-name: Sync uv.lock
-
+name: Sync uv.lock (fixer)
 on:
-  pull_request_target:
+  pull_request:     
     paths:
       - "pyproject.toml"
-
 permissions:
-  contents: write
-
+  contents: write     
 jobs:
   lock:
-    # Dependabot's own in-repo PRs only — never forks
     if: >-
       github.actor == 'dependabot[bot]' &&
       github.event.pull_request.head.repo.full_name == github.repository
@@ -21,15 +17,12 @@ jobs:
         with:
           ref: ${{ github.head_ref }}
           token: ${{ secrets.LOCKFILE_PAT }} 
-
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
         with:
           enable-cache: true
-
       - name: Regenerate uv.lock
         run: uv lock
-
       - name: Commit if changed
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
