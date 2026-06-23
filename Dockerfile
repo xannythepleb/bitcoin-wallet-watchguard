@@ -36,11 +36,14 @@ COPY --from=rust-builder --chown=root:root --chmod=0755 \
     /src/derivation-helper/target/release/wwg-derive \
     /app/wwg-derive
 
-# 1) Dependencies only — this layer is cached unless uv.lock changes
+# Patch system pip from the Python base image for CVE-2026-6357
+RUN /usr/local/bin/python -m pip install --no-cache-dir --upgrade pip==26.1.2
+
+# Dependencies only — this layer is cached unless uv.lock changes
 COPY pyproject.toml uv.lock ./
 RUN uv sync --locked --no-dev --no-install-project
 
-# 2) Now the project itself
+# Now the project itself
 COPY README.md ./
 COPY wallet_watchguard ./wallet_watchguard
 RUN uv sync --locked --no-dev
