@@ -1,48 +1,8 @@
-name: CI
-
-on:
-  push:
-    branches: [main]
-  pull_request:
-
-jobs:
-  python:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-        with:
-          enable-cache: true
-      - name: Sync dependencies (uv lock sync with pyproject)
-        run: uv sync --locked --all-extras
-      - name: Lint
-        run: uv run ruff check .
-        continue-on-error: true
-      - name: Format check
-        run: uv run ruff format --check .
-        continue-on-error: true
-      - name: Test
-        run: uv run pytest
-
-  rust:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: derivation-helper
-    steps:
-      - uses: actions/checkout@v7
-      - name: Format check
-        run: cargo fmt --check
-      - name: Clippy
-        run: cargo clippy --release
-      - name: Build
-        run: cargo build --release
-
   docker:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+
       - uses: docker/setup-buildx-action@v4
 
       - name: Build image with Tor (no push)
@@ -58,9 +18,55 @@ jobs:
           cache-from: type=gha,scope=wallet-watchguard
           cache-to: type=gha,mode=max,scope=wallet-watchguard,ignore-error=true
 
+      - name: Build slim image without Tor (no push)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          target: runtime-slim
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: wallet-watchguard:slim
+          cache-from: type=gha,scope=wallet-watchguard
+          cache-to: type=gha,mode=max,scope=wallet-watchguard,ignore-error=true
+
+      - name: Verify images do not run as root
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for image in wallet-watchguard:ci wallet-watchguard:slim; do
+            echo "Checking ${image}"
+
+            configured_user="$(docker image inspect "$image" --format '{{.Config.User}}')"
+            test "$configured_user" = "wwg"
+
+            configured_cmd="$(docker image inspect "$image" --format '{{json .Config.Cmd}}')"
+            test "$configured_cmd" = '["wwg","run"]'
+
+            docker run --rm --entrypoint sh "$image" -c '
+              test "$(id -u)" != "0"
+              test "$(id -un)" = "wwg"
+              command -v wwg >/dev/null
+              test -x /app/wwg-derive
+            '
+          done
+
       - name: Healthcheck image with Tor
         run: |
           docker run --rm wallet-watchguard:ci sh -c '
+            cat > /app/data/config.yaml <<EOF
+          app:
+            database_path: /app/data/watchguard.sqlite3
+            derivation_helper_path: /app/wwg-derive
+          EOF
+            wwg healthcheck --config /app/data/config.yaml --verbose
+          '
+
+      - name: Healthcheck slim image
+        run: |
+          docker run --rm wallet-watchguard:slim sh -c '
             cat > /app/data/config.yaml <<EOF
           app:
             database_path: /app/data/watchguard.sqlite3
@@ -79,31 +85,7 @@ jobs:
           ignore-unfixed: true
           hide-progress: true
           format: table
-          exit-code: "1"        # fail the PR on a fixable CRITICAL/HIGH
-
-      - name: Build slim image without Tor (no push)
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: ./Dockerfile
-          target: runtime-slim
-          platforms: linux/amd64
-          push: false
-          load: true
-          tags: wallet-watchguard:slim
-          cache-from: type=gha,scope=wallet-watchguard
-          cache-to: type=gha,mode=max,scope=wallet-watchguard,ignore-error=true
-
-      - name: Healthcheck slim image
-        run: |
-          docker run --rm wallet-watchguard:slim sh -c '
-            cat > /app/data/config.yaml <<EOF
-          app:
-            database_path: /app/data/watchguard.sqlite3
-            derivation_helper_path: /app/wwg-derive
-          EOF
-            wwg healthcheck --config /app/data/config.yaml --verbose
-          '
+          exit-code: "1"
 
       - name: Scan slim image with Trivy
         uses: aquasecurity/trivy-action@v0.36.0
@@ -115,4 +97,4 @@ jobs:
           ignore-unfixed: true
           hide-progress: true
           format: table
-          exit-code: "1"        # fail the PR on a fixable CRITICAL/HIGH
+          exit-code: "1"

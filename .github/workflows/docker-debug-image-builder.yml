@@ -44,13 +44,13 @@ jobs:
           echo "Using test image tag suffix: ${safe_branch}"
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -73,6 +73,48 @@ jobs:
           tags: |
             type=raw,value=test-${{ steps.test_tag.outputs.safe_branch }}-slim
             type=sha,prefix=test-${{ steps.test_tag.outputs.safe_branch }}-slim-sha-
+
+      - name: Build full image locally for non-root verification
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: runtime-tor
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: wwg-full:nonroot-test
+
+      - name: Build slim image locally for non-root verification
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: runtime-slim
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: wwg-slim:nonroot-test
+
+      - name: Verify images do not run as root
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for image in wwg-full:nonroot-test wwg-slim:nonroot-test; do
+            echo "Checking ${image}"
+
+            configured_user="$(docker image inspect "$image" --format '{{.Config.User}}')"
+            test "$configured_user" = "wwg"
+
+            configured_cmd="$(docker image inspect "$image" --format '{{json .Config.Cmd}}')"
+            test "$configured_cmd" = '["wwg","run"]'
+
+            docker run --rm --entrypoint sh "$image" -c '
+              test "$(id -u)" != "0"
+              test "$(id -un)" = "wwg"
+              command -v wwg >/dev/null
+              test -x /app/wwg-derive
+            '
+          done
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v7
