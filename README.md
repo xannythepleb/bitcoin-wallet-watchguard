@@ -14,6 +14,62 @@ The current iteration of this tool is only scratching the surface of its potenti
 
 The existing view only wallet features via command line syntax are useful but I'm already working on more big updates to this because it fills a genuine gap in my own setup. This will get a lot cooler very quickly.
 
+## First Time Setup
+
+### Local
+
+```bash
+wwg init
+wwg run
+```
+
+### Docker Compose
+
+```bash
+git clone https://github.com/xannythepleb/bitcoin-wallet-watchguard.git
+docker compose pull
+docker compose up -d
+docker compose run --rm wallet-watchguard wwg init
+```
+
+To launch in the future:
+
+```bash
+WWG_PASSPHRASE='your passphrase here' docker compose up -d
+```
+
+You can choose to store your `WWG_PASSPHRASE` in your `.env` for convenience, with obvious security tradeoffs.
+
+If the config already exists, `wwg init` asks whether to update part of the config, reset it, or exit.
+
+You can jump directly to a section:
+
+```bash
+wwg init --add ntfy
+wwg init --add electrum
+wwg init --add wallet
+wwg init --add mempool
+wwg init --add tor
+wwg init --add app
+wwg init --reset
+```
+
+### Docker Images
+
+Wallet Watchguard publishes Docker images to GitHub automatically. Images are built and pushed when a new version is released.
+
+For example:
+
+```bash
+docker pull ghcr.io/xannythepleb/bitcoin-wallet-watchguard:latest
+```
+
+Or:
+
+```bash
+docker run ghcr.io/xannythepleb/bitcoin-wallet-watchguard:latest wwg init
+```
+
 ## Conversation Mode: Talk to Your Wallet Anywhere
 
 Conversation Mode lets you query Wallet Watchguard remotely through ntfy. You can keep an eye on even your hardware cold storage wherever you are via 100% self-hosted infrastructure. No third party middleman if you configure it correctly with your own node and your own ntfy instance. You can run both of these on your own physical hardware using Start9 or Umbrel for true sovereignty.
@@ -67,56 +123,6 @@ wwg fees
 The default command prefix is `wwg`. The prefix avoids accidental replies to unrelated messages on the same topic.
 
 All of these commands are also accepted by the CLI.
-
-## First Time Setup
-
-### Local
-
-```bash
-wwg init
-wwg run
-```
-
-### Docker Compose
-
-```bash
-mkdir -p data
-docker compose build
-docker compose run --rm wallet-watchguard wwg init
-WWG_PASSPHRASE='your passphrase here' docker compose up -d
-```
-
-If the config already exists, `wwg init` asks whether to update part of the config, reset it, or exit.
-
-You can choose to store your `WWG_PASSPHRASE` in your `.env` for convenience, with obvious security tradeoffs.
-
-You can jump directly to a section:
-
-```bash
-wwg init --add ntfy
-wwg init --add electrum
-wwg init --add wallet
-wwg init --add mempool
-wwg init --add tor
-wwg init --add app
-wwg init --reset
-```
-
-### Docker Images
-
-Wallet Watchguard publishes Docker images to GitHub automatically. Images are built and pushed when a new version is released.
-
-For example:
-
-```bash
-docker pull ghcr.io/xannythepleb/bitcoin-wallet-watchguard:latest
-```
-
-Or:
-
-```bash
-docker run ghcr.io/xannythepleb/bitcoin-wallet-watchguard:latest wwg init
-```
 
 ## Conversation Mode Setup
 
@@ -499,8 +505,24 @@ Bitcoin Wallet Watchguard uses:
 * XSalsa20-Poly1305 for encrypted-at-rest xpubs and credentials (via PyNaCl/libsodium)
 * Docker Compose for reliable 24/7 deployment
 
+## Dependencies
+
+WWG uses a short list of dependencies. I wanted to strike the right balance between using battletested libraries, especially for sensitive and difficult operations such as cryptography, and reducing bloat and attack surface.
+
+Below are the Python dependencies and what they're used for:
+
+- **PyYAML**: Reads and writes WWG’s `config.yaml`, including wallet definitions, Electrum settings, Tor options, notifications, and all other configuration options.
+- **httpx**: Makes HTTP requests for external services such as Mempool lookups, Ntfy endpoints, Electrum servers, and other API calls.
+- **aiosqlite**: Provides async SQLite access for WWG’s local database, including wallet events, transaction history, and stats.
+- **PyNaCl**: Handles cryptographic operations for secure passphrase based encryption and password hashing. This is used to encrypt xpubs at rest.
+- **python-socks[asyncio]**: Adds async SOCKS proxy support, used for routing Electrum or HTTP connections through Tor, especially when connecting to `.onion` services.
+
+Additionally, the Tor Debian package is installed on the Docker image in order to provide the built in Tor functionality that allows connection to upstream Bitcoin nodes that are accessible via an onion service without external proxy configuration.
+
 ## Security Notes
 
 The xpub and ntfy credentials are encrypted at rest using the Wallet Watchguard passphrase. You need this passphrase whenever the daemon starts.
 
 An xpub cannot spend funds, but it can reveal wallet history and future addresses. Run Wallet Watchguard on infrastructure you control, including your own Bitcoin node, Fulcrum, and ntfy instance for the highest level of privacy.
+
+The Docker image has limited permissions by design. Even though this application is not designed to be accessible to the internet, and therefore the only attack vector would be whatever else is on your own machine, I've still ensured that gaining access to the WWG Docker container doesn't grant root access to it - it runs in its own user inside the Debian based environment the image is built on.
