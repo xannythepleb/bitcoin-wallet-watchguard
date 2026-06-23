@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import os
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -15,11 +15,11 @@ from .crypto import SCHEME
 PLACEHOLDER_NTFY_TOPIC = "wallet-watchguard-replace-me"
 
 # Wallet Watchguard keeps its persistent local state under ./data by default.
-# This keeps config.yaml and the SQLite database together for both local and
-# Docker Compose users, assuming Compose mounts the project ./data directory.
-DEFAULT_DATA_DIR = "./data"
-DEFAULT_CONFIG_PATH = f"{DEFAULT_DATA_DIR}/config.yaml"
-DEFAULT_DATABASE_PATH = f"{DEFAULT_DATA_DIR}/watchguard.sqlite3"
+# Docker images can override these paths with WWG_CONFIG and WWG_DATABASE,
+# usually pointing both at the Docker-managed /app/data volume.
+DEFAULT_DATA_DIR = os.getenv("WWG_DATA_DIR", "./data")
+DEFAULT_CONFIG_PATH = os.getenv("WWG_CONFIG", f"{DEFAULT_DATA_DIR}/config.yaml")
+DEFAULT_DATABASE_PATH = os.getenv("WWG_DATABASE", f"{DEFAULT_DATA_DIR}/watchguard.sqlite3")
 
 
 class ConfigError(ValueError):
