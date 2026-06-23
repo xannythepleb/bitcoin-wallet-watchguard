@@ -1,7 +1,6 @@
 services:
   wallet-watchguard:
     image: ghcr.io/xannythepleb/bitcoin-wallet-watchguard:latest
-    #user: "${WWG_UID:-10001}:${WWG_GID:-10001}"
     container_name: wallet-watchguard
     restart: unless-stopped
     environment:
@@ -16,7 +15,6 @@ services:
       # Also makes this shit easier to maintain
       WWG_DATA_DIR: /app/data
     volumes:
-      #- ./data:/app/data
       - wwg-data:/app/data
 
 volumes:
