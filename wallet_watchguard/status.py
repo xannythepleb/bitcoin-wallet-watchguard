@@ -5,8 +5,8 @@ from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 from typing import Any
 
+from .config import DEFAULT_CONFIG_PATH, DEFAULT_DATABASE_PATH
 from .tor import tor_config_from_app_config
-
 
 def get_app_version() -> str:
     try:
@@ -125,7 +125,7 @@ def tor_upstream_line(config: dict[str, Any], *, use_emoji: bool = True) -> str:
 def build_status_text(
     config: dict[str, Any],
     *,
-    config_path: str | Path,
+    config_path: str | Path | None = None,
     ntfy_config: dict[str, Any] | None = None,
     conversation_ntfy_config: dict[str, Any] | None = None,
     subscription_count: int | None = None,
@@ -147,6 +147,7 @@ def build_status_text(
 
     use_emoji = _status_use_emoji(config, use_emoji)
 
+    app_config = config.get("app") or {}
     ntfy = ntfy_config or config["ntfy"]
     mempool_config = config.get("mempool") or {}
     conversation = config.get("conversation") or {}
@@ -156,13 +157,16 @@ def build_status_text(
 
     lightning_contact = "⚡ xanny@cake.cash" if use_emoji else "xanny@cake.cash"
 
+    display_config_path = str(config_path) if config_path is not None else DEFAULT_CONFIG_PATH
+    display_database_path = app_config.get("database_path") or DEFAULT_DATABASE_PATH
+
     lines: list[str] = [
         "",
         f"Bitcoin Wallet Watchguard {version_label} by xannythepleb ({lightning_contact}) is running",
         "-------------------------------------",
         f"{_label('Version:', '📦', use_emoji=use_emoji)} {version_label}",
-        f"{_label('Config:', '⚙️ ', use_emoji=use_emoji)} {config_path}",
-        f"{_label('Database:', '💾', use_emoji=use_emoji)} {config['app']['database_path']}",
+        f"{_label('Config:', '⚙️ ', use_emoji=use_emoji)} {display_config_path}",
+        f"{_label('Database:', '💾', use_emoji=use_emoji)} {display_database_path}",
     ]
 
     lines.extend(
@@ -221,7 +225,7 @@ def build_status_text(
         lines.append(
             "  - "
             f"{wallet['name']} | {wallet['network']} | {wallet['wallet_type']} | "
-            f"lookahead={wallet.get('lookahead', config['app'].get('lookahead', 100))}"
+            f"lookahead={wallet.get('lookahead', app_config.get('lookahead', 100))}"
         )
 
     if include_useful_commands:

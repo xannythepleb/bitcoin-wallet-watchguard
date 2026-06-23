@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from .config import DEFAULT_CONFIG_PATH, DEFAULT_DATABASE_PATH
 from .conversation import ConversationBridge, ConversationModeError
 from .crypto import decrypt_xpub_with_passphrase, metadata_from_config, prompt_existing_passphrase
 from .db import Database
@@ -21,9 +22,13 @@ class Watcher:
     def __init__(self, config: dict[str, Any], passphrase: str, *, config_path: str | Path | None = None) -> None:
         self.config = config
         self.passphrase = passphrase
-        self.config_path = str(config_path) if config_path is not None else "config.yaml"
+        self.config_path = str(config_path) if config_path is not None else DEFAULT_CONFIG_PATH
         self.tor_upstream = TorUpstreamManager(config)
-        self.db = Database(config["app"]["database_path"])
+
+        app_config = config.get("app") or {}
+        database_path = app_config.get("database_path") or DEFAULT_DATABASE_PATH
+        self.db = Database(database_path)
+        
         electrum = config["electrum"]
         self.client = ElectrumClient(
             electrum["host"],
