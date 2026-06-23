@@ -14,12 +14,12 @@ from .crypto import SCHEME
 # shows it to the user.
 PLACEHOLDER_NTFY_TOPIC = "wallet-watchguard-replace-me"
 
-# Wallet Watchguard keeps its persistent local state under ./data by default.
-# Docker images can override these paths with WWG_CONFIG and WWG_DATABASE,
-# usually pointing both at the Docker-managed /app/data volume.
+# Wallet Watchguard keeps its persistent local state under one data directory.
+# Local users default to ./data. Docker users can set WWG_DATA_DIR=/app/data,
+# which should point at the Docker-managed named volume.
 DEFAULT_DATA_DIR = os.getenv("WWG_DATA_DIR", "./data")
-DEFAULT_CONFIG_PATH = os.getenv("WWG_CONFIG", f"{DEFAULT_DATA_DIR}/config.yaml")
-DEFAULT_DATABASE_PATH = os.getenv("WWG_DATABASE", f"{DEFAULT_DATA_DIR}/watchguard.sqlite3")
+DEFAULT_CONFIG_PATH = f"{DEFAULT_DATA_DIR}/config.yaml"
+DEFAULT_DATABASE_PATH = f"{DEFAULT_DATA_DIR}/watchguard.sqlite3"
 
 
 class ConfigError(ValueError):

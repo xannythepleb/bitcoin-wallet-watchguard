@@ -11,10 +11,10 @@ services:
       # Optional: set to true to enable the internal Tor upstream.
       # You can also use tor.enabled: true in config.yaml.
       WWG_TOR_UPSTREAM: ${WWG_TOR_UPSTREAM:-false}
-      # Keep config and db in a Docker volume
+      # Keep config and db in a Docker volume with a single variable
       # Avoids ownership and permissions issues with Docker & SQLite
-      WWG_CONFIG: /app/data/config.yaml
-      WWG_DATABASE: /app/data/watchguard.sqlite3
+      # Also makes this shit easier to maintain
+      WWG_DATA_DIR: /app/data
     volumes:
       #- ./data:/app/data
       - wwg-data:/app/data
