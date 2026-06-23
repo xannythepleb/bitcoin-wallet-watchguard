@@ -3,6 +3,12 @@ name: Build and publish Docker image
 "on":
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish, e.g. v0.2.0"
+        required: true
+        type: string
 
 concurrency:
   group: docker-${{ github.ref }}
@@ -23,7 +29,7 @@ jobs:
 
   verify-lock:
     runs-on: ubuntu-latest
-    if: ${{ startsWith(github.event.release.tag_name, 'v') }}
+    if: ${{ (github.event_name == 'release' && startsWith(github.event.release.tag_name, 'v')) || (github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v8.1.0
@@ -34,7 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: verify-lock
 
-    if: ${{ startsWith(github.event.release.tag_name, 'v') }}
+    if: ${{ (github.event_name == 'release' && startsWith(github.event.release.tag_name, 'v')) || (github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
 
     steps:
       - name: Check out repository
@@ -42,13 +48,39 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            version="${{ github.event.release.tag_name }}"
+            prerelease="${{ github.event.release.prerelease }}"
+          else
+            version="${{ inputs.version }}"
+            prerelease="false"
+
+            if [[ ! "${version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Manual release version must use stable vX.Y.Z format, for example v0.2.0"
+              exit 1
+            fi
+          fi
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "prerelease=${prerelease}" >> "${GITHUB_OUTPUT}"
+
+          echo "Docker release version: ${version}"
+          echo "Prerelease: ${prerelease}"
+
       - name: Verify release tag is on default branch
+        if: ${{ github.event_name == 'release' }}
         shell: bash
         run: |
           set -euo pipefail
 
           default_branch="${{ github.event.repository.default_branch }}"
-          tag="${{ github.event.release.tag_name }}"
+          tag="${{ steps.version.outputs.version }}"
 
           git fetch --force origin "refs/heads/${default_branch}:refs/remotes/origin/${default_branch}"
           git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
@@ -90,11 +122,13 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ steps.image.outputs.image_name }}
+          flavor: |
+            latest=false
           tags: |
-            type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
-            type=ref,event=tag
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ steps.version.outputs.prerelease == 'false' }}
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=semver,pattern={{version}},value=${{ steps.version.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.version }}
             type=sha,prefix=sha-
           labels: |
             org.opencontainers.image.title="Bitcoin Wallet Watchguard"
@@ -106,11 +140,13 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ steps.image.outputs.image_name }}
+          flavor: |
+            latest=false
           tags: |
-            type=raw,value=slim,enable=${{ !github.event.release.prerelease }}
-            type=ref,event=tag,suffix=-slim
-            type=semver,pattern={{version}},suffix=-slim
-            type=semver,pattern={{major}}.{{minor}},suffix=-slim
+            type=raw,value=slim,enable=${{ steps.version.outputs.prerelease == 'false' }}
+            type=raw,value=${{ steps.version.outputs.version }},suffix=-slim
+            type=semver,pattern={{version}},value=${{ steps.version.outputs.version }},suffix=-slim
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.version }},suffix=-slim
             type=sha,prefix=sha-,suffix=-slim
           labels: |
             org.opencontainers.image.title="Bitcoin Wallet Watchguard"
@@ -136,7 +172,7 @@ jobs:
       - name: Healthcheck pushed Docker image
         shell: bash
         run: |
-          docker run --rm "${{ steps.image.outputs.image_name }}:${{ github.event.release.tag_name }}" sh -c '
+          docker run --rm "${{ steps.image.outputs.image_name }}:${{ steps.version.outputs.version }}" sh -c '
             cat > /app/data/config.yaml <<EOF
           app:
             database_path: /app/data/watchguard.sqlite3
@@ -164,7 +200,7 @@ jobs:
       - name: Healthcheck pushed slim Docker image
         shell: bash
         run: |
-          docker run --rm "${{ steps.image.outputs.image_name }}:${{ github.event.release.tag_name }}-slim" sh -c '
+          docker run --rm "${{ steps.image.outputs.image_name }}:${{ steps.version.outputs.version }}-slim" sh -c '
             cat > /app/data/config.yaml <<EOF
           app:
             database_path: /app/data/watchguard.sqlite3
@@ -176,7 +212,7 @@ jobs:
       - name: Scan pushed Docker image with Trivy
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ${{ steps.image.outputs.image_name }}:${{ github.event.release.tag_name }}
+          image-ref: ${{ steps.image.outputs.image_name }}:${{ steps.version.outputs.version }}
           scanners: vuln
           vuln-type: os,library
           severity: CRITICAL,HIGH
@@ -192,7 +228,7 @@ jobs:
       - name: Scan pushed slim Docker image with Trivy
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ${{ steps.image.outputs.image_name }}:${{ github.event.release.tag_name }}-slim
+          image-ref: ${{ steps.image.outputs.image_name }}:${{ steps.version.outputs.version }}-slim
           scanners: vuln
           vuln-type: os,library
           severity: CRITICAL,HIGH
