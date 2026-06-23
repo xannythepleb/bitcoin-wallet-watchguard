@@ -44,21 +44,71 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
-      - name: Build image (no push)
+
+      - name: Build image with Tor (no push)
         uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
+          target: runtime-tor
           platforms: linux/amd64
           push: false
           load: true
           tags: wallet-watchguard:ci
           cache-from: type=gha,scope=wallet-watchguard
           cache-to: type=gha,mode=max,scope=wallet-watchguard,ignore-error=true
-      - name: Scan image with Trivy
+
+      - name: Healthcheck image with Tor
+        run: |
+          docker run --rm wallet-watchguard:ci sh -c '
+            cat > /app/data/config.yaml <<EOF
+          app:
+            database_path: /app/data/watchguard.sqlite3
+            derivation_helper_path: /app/wwg-derive
+          EOF
+            wwg healthcheck --config /app/data/config.yaml --verbose
+          '
+
+      - name: Scan image with Tor using Trivy
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: wallet-watchguard:ci
+          scanners: vuln
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          hide-progress: true
+          format: table
+          exit-code: "1"        # fail the PR on a fixable CRITICAL/HIGH
+
+      - name: Build slim image without Tor (no push)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          target: runtime-slim
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: wallet-watchguard:slim
+          cache-from: type=gha,scope=wallet-watchguard
+          cache-to: type=gha,mode=max,scope=wallet-watchguard,ignore-error=true
+
+      - name: Healthcheck slim image
+        run: |
+          docker run --rm wallet-watchguard:slim sh -c '
+            cat > /app/data/config.yaml <<EOF
+          app:
+            database_path: /app/data/watchguard.sqlite3
+            derivation_helper_path: /app/wwg-derive
+          EOF
+            wwg healthcheck --config /app/data/config.yaml --verbose
+          '
+
+      - name: Scan slim image with Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: wallet-watchguard:slim
           scanners: vuln
           vuln-type: os,library
           severity: CRITICAL,HIGH

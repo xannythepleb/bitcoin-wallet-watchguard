@@ -98,9 +98,9 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=sha-
           labels: |
-            org.opencontainers.image.title=Bitcoin Wallet Watchguard
+            org.opencontainers.image.title="Bitcoin Wallet Watchguard"
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.description=Bitcoin Wallet Watchguard: Talk to your Bitcoin node via Electrum and Ntfy
+            org.opencontainers.image.description="Bitcoin Wallet Watchguard: Talk to your Bitcoin node via Electrum and Ntfy"
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v7
