@@ -1,4 +1,45 @@
-  docker:
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+      - name: Sync dependencies (uv lock sync with pyproject)
+        run: uv sync --locked --all-extras
+      - name: Lint
+        run: uv run ruff check .
+        continue-on-error: true
+      - name: Format check
+        run: uv run ruff format --check .
+        continue-on-error: true
+      - name: Test
+        run: uv run pytest
+
+  rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: derivation-helper
+    steps:
+      - uses: actions/checkout@v7
+      - name: Format check
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --release
+      - name: Build
+        run: cargo build --release
+
+    docker:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
