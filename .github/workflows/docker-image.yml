@@ -90,13 +90,28 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ steps.image.outputs.image_name }}
-          # purposefully allowing prerelease onto latest below while it is in beta
           tags: |
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
             type=ref,event=tag
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=sha-
+          labels: |
+            org.opencontainers.image.title="Bitcoin Wallet Watchguard"
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.description="Bitcoin Wallet Watchguard: Talk to your Bitcoin node via Electrum and Ntfy"
+
+      - name: Generate slim Docker image metadata
+        id: meta_slim
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.image.outputs.image_name }}
+          tags: |
+            type=raw,value=slim,enable=${{ !github.event.release.prerelease }}
+            type=ref,event=tag,suffix=-slim
+            type=semver,pattern={{version}},suffix=-slim
+            type=semver,pattern={{major}}.{{minor}},suffix=-slim
+            type=sha,prefix=sha-,suffix=-slim
           labels: |
             org.opencontainers.image.title="Bitcoin Wallet Watchguard"
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
@@ -108,6 +123,7 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
+          target: runtime-tor
           platforms: linux/amd64,linux/arm64
           push: true
           pull: true
@@ -116,6 +132,46 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           provenance: true
           sbom: true
+
+      - name: Healthcheck pushed Docker image
+        shell: bash
+        run: |
+          docker run --rm "${{ steps.image.outputs.image_name }}:${{ github.event.release.tag_name }}" sh -c '
+            cat > /app/data/config.yaml <<EOF
+          app:
+            database_path: /app/data/watchguard.sqlite3
+            derivation_helper_path: /app/wwg-derive
+          EOF
+            wwg healthcheck --config /app/data/config.yaml --verbose
+          '
+
+      - name: Build and push slim Docker image
+        uses: docker/build-push-action@v7
+        id: build_slim
+        with:
+          context: .
+          file: ./Dockerfile
+          target: runtime-slim
+          platforms: linux/amd64,linux/arm64
+          push: true
+          pull: true
+          no-cache: true
+          tags: ${{ steps.meta_slim.outputs.tags }}
+          labels: ${{ steps.meta_slim.outputs.labels }}
+          provenance: true
+          sbom: true
+
+      - name: Healthcheck pushed slim Docker image
+        shell: bash
+        run: |
+          docker run --rm "${{ steps.image.outputs.image_name }}:${{ github.event.release.tag_name }}-slim" sh -c '
+            cat > /app/data/config.yaml <<EOF
+          app:
+            database_path: /app/data/watchguard.sqlite3
+            derivation_helper_path: /app/wwg-derive
+          EOF
+            wwg healthcheck --config /app/data/config.yaml --verbose
+          '
 
       - name: Scan pushed Docker image with Trivy
         uses: aquasecurity/trivy-action@v0.36.0
@@ -128,6 +184,22 @@ jobs:
           hide-progress: true
           format: sarif
           output: trivy-image-results.sarif
+          exit-code: "0"
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Scan pushed slim Docker image with Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ steps.image.outputs.image_name }}:${{ github.event.release.tag_name }}-slim
+          scanners: vuln
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          hide-progress: true
+          format: sarif
+          output: trivy-slim-image-results.sarif
           exit-code: "0"
         env:
           TRIVY_USERNAME: ${{ github.actor }}
@@ -153,5 +225,14 @@ jobs:
         with:
           sarif_file: trivy-image-results.sarif
           category: trivy-image
+          ref: refs/heads/${{ steps.default_branch.outputs.branch }}
+          sha: ${{ steps.default_branch.outputs.sha }}
+
+      - name: Upload Trivy slim image results to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@v4
+        if: ${{ always() && hashFiles('trivy-slim-image-results.sarif') != '' }}
+        with:
+          sarif_file: trivy-slim-image-results.sarif
+          category: trivy-slim-image
           ref: refs/heads/${{ steps.default_branch.outputs.branch }}
           sha: ${{ steps.default_branch.outputs.sha }}
