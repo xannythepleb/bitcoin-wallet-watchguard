@@ -1,7 +1,7 @@
 services:
   wallet-watchguard:
     image: ghcr.io/xannythepleb/bitcoin-wallet-watchguard:latest
-    user: "${WWG_UID:-1000}:${WWG_GID:-1000}"
+    #user: "${WWG_UID:-10001}:${WWG_GID:-10001}"
     container_name: wallet-watchguard
     restart: unless-stopped
     environment:
@@ -11,5 +11,14 @@ services:
       # Optional: set to true to enable the internal Tor upstream.
       # You can also use tor.enabled: true in config.yaml.
       WWG_TOR_UPSTREAM: ${WWG_TOR_UPSTREAM:-false}
+      # Keep config and db in a Docker volume
+      # Avoids ownership and permissions issues with Docker & SQLite
+      WWG_CONFIG: /app/data/config.yaml
+      WWG_DATABASE: /app/data/watchguard.sqlite3
     volumes:
-      - ./data:/app/data
+      #- ./data:/app/data
+      - wwg-data:/app/data
+
+volumes:
+  wwg-data:
+    name: wwg-data
