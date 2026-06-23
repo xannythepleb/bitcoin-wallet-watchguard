@@ -19,6 +19,8 @@ The existing view only wallet features via command line syntax are useful but I'
 ### Local
 
 ```bash
+git clone https://github.com/xannythepleb/bitcoin-wallet-watchguard.git
+cd bitcoin-wallet-watchguard
 wwg init
 wwg run
 ```
@@ -27,6 +29,7 @@ wwg run
 
 ```bash
 git clone https://github.com/xannythepleb/bitcoin-wallet-watchguard.git
+cd bitcoin-wallet-watchguard
 docker compose pull
 docker compose up -d
 docker compose run --rm wallet-watchguard wwg init
