@@ -58,7 +58,7 @@ jobs:
 
       - name: Generate Docker image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
@@ -67,7 +67,7 @@ jobs:
 
       - name: Generate slim Docker image metadata
         id: meta_slim
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
