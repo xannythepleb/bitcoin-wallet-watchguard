@@ -520,6 +520,19 @@ Below are the Python dependencies and what they're used for:
 - **PyNaCl**: Handles cryptographic operations for secure passphrase based encryption and password hashing. This is used to encrypt xpubs at rest.
 - **python-socks[asyncio]**: Adds async SOCKS proxy support, used for routing Electrum or HTTP connections through Tor, especially when connecting to `.onion` services.
 
+And for the Rus helper:
+
+* **anyhow**: Used for simple fallible CLI flow: `Result<()>`, custom validation errors via `anyhow!`, and extra context on parsing/derivation failures via `.context(...)`
+* **bitcoin**: The core wallet derivation library. Used to parse the supplied `xpub`, derive public keys, and generate the four main Bitcoin address types:
+  * Taproot: `p2tr`
+  * Native SegWit: `p2wpkh`
+  * Nested SegWit: `p2shwpkh`
+  * Legacy: `p2pkh`
+* **clap**: Defines the `wwg-derive` CLI interface. It parses the `derive` subcommand and arguments like `--xpub`, `--network`, `--wallet-type`, `--start`, `--end`, etc. `ValueEnum` is used for valid wallet/network choices.
+* **hex**: Used once to encode each derived address’s `script_pubkey` bytes into a hex string for JSON output.
+* **serde**: Used only to derive `Serialize` for `DerivedRow`, the struct representing each derived address row.
+* **serde_json**: Serialises the list of derived rows into pretty printed JSON, which the Python side of WWG can consume.
+
 Additionally, the Tor Debian package is installed on the Docker image in order to provide the built in Tor functionality that allows connection to upstream Bitcoin nodes that are accessible via an onion service without external proxy configuration.
 
 ## Security Notes
