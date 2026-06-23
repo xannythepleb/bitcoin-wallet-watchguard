@@ -65,11 +65,31 @@ jobs:
             type=raw,value=test-${{ steps.test_tag.outputs.safe_branch }}
             type=sha,prefix=test-${{ steps.test_tag.outputs.safe_branch }}-sha-
 
+      - name: Generate slim Docker image metadata
+        id: meta_slim
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=test-${{ steps.test_tag.outputs.safe_branch }}-slim
+            type=sha,prefix=test-${{ steps.test_tag.outputs.safe_branch }}-slim-sha-
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v7
         with:
           context: .
+          target: runtime-tor
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Build and push slim Docker image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: runtime-slim
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta_slim.outputs.tags }}
+          labels: ${{ steps.meta_slim.outputs.labels }}

@@ -2,6 +2,9 @@
 .git
 .gitignore
 
+# Pipelines
+.github/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -17,14 +20,23 @@ dist/
 target/
 derivation-helper/target/
 
+# Docker
+Dockerfile*
+docker-compose*.yml
+
 # Runtime data & secrets — never bake these into an image layer
 data/
 *.db
+*.db-*
 *.sqlite
 *.sqlite3
+*.sqlite3-*
 .env
 
 # Editor / OS
 .idea/
 .vscode/
 .DS_Store
+
+# README
+*.md

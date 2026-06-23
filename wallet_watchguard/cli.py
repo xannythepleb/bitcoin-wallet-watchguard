@@ -28,6 +28,7 @@ from .ntfy import NtfyNotifier, decrypt_ntfy_config
 from .status import build_status_text, format_server_version, tor_upstream_lines
 from .tor import TorUpstreamManager, apply_tor_upstream, env_tor_upstream_enabled
 from .watcher import Watcher, get_passphrase_from_env_or_prompt
+from .healthcheck import main as healthcheck_main
 
 
 INIT_SECTIONS = ["full", "electrum", "ntfy", "wallet", "app", "mempool", "tor", "conversation"]
@@ -1522,6 +1523,24 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_healthcheck(args: argparse.Namespace) -> int:
+    healthcheck_args = ["--config", str(args.config)]
+
+    if args.data_dir:
+        healthcheck_args.extend(["--data-dir", str(args.data_dir)])
+
+    if args.database:
+        healthcheck_args.extend(["--database", str(args.database)])
+
+    if args.derivation_helper:
+        healthcheck_args.extend(["--derivation-helper", str(args.derivation_helper)])
+
+    if args.verbose:
+        healthcheck_args.append("--verbose")
+
+    return healthcheck_main(healthcheck_args)
+
+
 def cmd_stats(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     database_path = _database_path_from_config(config)
@@ -1713,6 +1732,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_status.add_argument("--no-emoji", action="store_true", help="Disable emoji in status output")
     _add_tor_upstream_arg(p_status)
     p_status.set_defaults(func=cmd_status)
+
+    p_healthcheck = sub.add_parser(
+        "healthcheck",
+        help="Run local container/runtime health checks",
+    )
+    p_healthcheck.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_healthcheck.add_argument("--data-dir", default=None, help="Override the data directory path")
+    p_healthcheck.add_argument("--database", default=None, help="Override the SQLite database path")
+    p_healthcheck.add_argument(
+        "--derivation-helper",
+        default=None,
+        help="Override the Rust derivation helper path",
+    )
+    p_healthcheck.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print successful checks as well as failures",
+    )
+    p_healthcheck.set_defaults(func=cmd_healthcheck)
 
     p_stats = sub.add_parser("stats", help="Show wallet statistics from the SQLite database")
     p_stats.add_argument("--config", default=DEFAULT_CONFIG_PATH)
