@@ -150,3 +150,10 @@ tor:
 #     change_path_template: "1/*"
 #     lookahead: 100
 wallets: []
+
+# Autobalance configuration
+autobalance:
+  enabled: false
+  interval_hours: 12
+  all_wallets: true
+  wallets: []
