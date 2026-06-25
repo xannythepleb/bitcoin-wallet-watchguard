@@ -553,7 +553,7 @@ class Watcher:
         )
 
         await self.notifier.send(
-            "Wallet Watchguard autobalance",
+            "Wallet Watchguard: Autobalance",
             "\n\n".join(lines),
             tags="bitcoin,watch",
         )
