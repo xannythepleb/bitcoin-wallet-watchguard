@@ -564,11 +564,11 @@ class Watcher:
         interval_seconds = interval_hours * 60 * 60
 
         while True:
-            await asyncio.sleep(interval_seconds)
             try:
                 await self._send_autobalance_notification()
             except Exception as exc:
                 print(f"Autobalance notification failed: {exc}", flush=True)
+            await asyncio.sleep(interval_seconds)
 
     async def _notify_activity(self, event: WalletEvent, *, debug_latest: bool = False) -> None:
         if debug_latest:
