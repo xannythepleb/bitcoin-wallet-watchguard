@@ -197,8 +197,32 @@ def validate_config(config: dict[str, Any]) -> None:
         if int(conversation.get("max_response_chars", 3900)) < 500:
             raise ConfigError("conversation.max_response_chars must be at least 500")
 
+    autobalance = config.get("autobalance") or {}
+    if autobalance:
+        _validate_boolish(autobalance, "enabled", "autobalance")
+        _validate_boolish(autobalance, "all_wallets", "autobalance")
+
+        if int(autobalance.get("interval_hours", 12)) < 1:
+            raise ConfigError("autobalance.interval_hours must be at least 1")
+
+        configured_wallets = autobalance.get("wallets") or []
+        if not isinstance(configured_wallets, list):
+            raise ConfigError("autobalance.wallets must be a list")
+        for wallet_name in configured_wallets:
+            if not isinstance(wallet_name, str) or not wallet_name.strip():
+                raise ConfigError("autobalance.wallets must contain non-blank wallet names")
+
+        if bool(autobalance.get("enabled", False)) and not bool(autobalance.get("all_wallets", True)) and not configured_wallets:
+            raise ConfigError("autobalance is enabled for selected wallets but autobalance.wallets is empty")
+
     if not isinstance(config["wallets"], list) or not config["wallets"]:
         raise ConfigError("Config must contain at least one wallet")
+
+    configured_wallet_names = {str(wallet.get("name") or "").strip() for wallet in config["wallets"] if isinstance(wallet, dict)}
+    if autobalance and not bool(autobalance.get("all_wallets", True)):
+        for wallet_name in autobalance.get("wallets") or []:
+            if wallet_name not in configured_wallet_names:
+                raise ConfigError(f"autobalance references unknown wallet: {wallet_name}")
 
     for wallet in config["wallets"]:
         for key in ["name", "network", "wallet_type", "account_path", "encrypted_xpub", "xpub_encryption"]:
@@ -272,6 +296,12 @@ def default_config() -> dict[str, Any]:
                 "probe_anonymous_write": True,
                 "max_addresses_per_response": 10,
                 "max_response_chars": 3900,
+            },
+            "autobalance": {
+                "enabled": False,
+                "interval_hours": 12,
+                "all_wallets": True,
+                "wallets": [],
             },
             "wallets": [],
         }

@@ -1154,7 +1154,159 @@ def _rename_wallet_in_config(config: dict, wallet: dict, new_name: str) -> str:
             raise ValueError(f"A wallet named {new_name!r} already exists")
 
     wallet["name"] = new_name
+
+    autobalance = config.get("autobalance") or {}
+    if isinstance(autobalance.get("wallets"), list):
+        autobalance["wallets"] = [new_name if wallet_name == old_name else wallet_name for wallet_name in autobalance["wallets"]]
+
     return old_name
+
+
+def _ensure_autobalance_config(config: dict) -> dict:
+    defaults = (default_config().get("autobalance") or {}).copy()
+    existing = config.get("autobalance") or {}
+    autobalance = {**defaults, **existing}
+    autobalance["interval_hours"] = int(autobalance.get("interval_hours", 12))
+    autobalance["all_wallets"] = bool(autobalance.get("all_wallets", True))
+    autobalance["enabled"] = bool(autobalance.get("enabled", False))
+    autobalance["wallets"] = [str(name) for name in autobalance.get("wallets") or [] if str(name).strip()]
+    config["autobalance"] = autobalance
+    return autobalance
+
+
+def _config_file_has_section(config_path: Path, section: str) -> bool:
+    if not config_path.exists() or config_path.is_dir():
+        return False
+
+    with config_path.open("r", encoding="utf-8") as f:
+        loaded = yaml.safe_load(f) or {}
+
+    return isinstance(loaded, dict) and section in loaded
+
+
+def _autobalance_wallet_selection_text(config: dict) -> str:
+    autobalance = _ensure_autobalance_config(config)
+    if autobalance.get("all_wallets", True):
+        return "all wallets combined"
+
+    wallet_names = autobalance.get("wallets") or []
+    return ", ".join(wallet_names) if wallet_names else "no wallets selected"
+
+
+def _print_autobalance_status(config: dict) -> None:
+    autobalance = _ensure_autobalance_config(config)
+    state = "enabled" if autobalance.get("enabled", False) else "disabled"
+    print("Autobalance:")
+    print(f"  Status: {state}")
+    print(f"  Interval: every {int(autobalance.get('interval_hours', 12))} hour(s)")
+    print(f"  Wallets: {_autobalance_wallet_selection_text(config)}")
+
+
+def _prompt_autobalance_interval(current_interval: int | None = None) -> int:
+    default = str(current_interval or 12)
+    while True:
+        raw = _prompt("Autobalance interval in hours", default).strip()
+        try:
+            interval_hours = int(raw)
+        except ValueError:
+            print("Please enter a whole number of hours.")
+            continue
+        if interval_hours >= 1:
+            return interval_hours
+        print("Please enter an interval of at least 1 hour.")
+
+
+def _wallet_names_from_indexes(config: dict, indexes: list[int]) -> list[str]:
+    wallets = config.get("wallets") or []
+    if not wallets:
+        raise ValueError("No wallets are configured")
+
+    selected: list[str] = []
+    for wallet_index in indexes:
+        index = int(wallet_index) - 1
+        if index < 0 or index >= len(wallets):
+            raise ValueError(f"Wallet index must be between 1 and {len(wallets)}")
+        wallet_name = str(wallets[index]["name"])
+        if wallet_name not in selected:
+            selected.append(wallet_name)
+
+    return selected
+
+
+def _parse_autobalance_wallet_choice(choice: str, wallet_count: int) -> tuple[bool, list[int]]:
+    text = choice.strip().lower()
+    if text == "all":
+        return True, []
+
+    indexes: list[int] = []
+    for part in text.replace(",", " ").split():
+        try:
+            wallet_index = int(part)
+        except ValueError:
+            raise ValueError("Please enter wallet numbers separated by spaces or commas, or 'all'.") from None
+        if wallet_index < 1 or wallet_index > wallet_count:
+            raise ValueError(f"Wallet index must be between 1 and {wallet_count}")
+        if wallet_index not in indexes:
+            indexes.append(wallet_index)
+
+    if not indexes:
+        raise ValueError("Please choose at least one wallet, or 'all'.")
+
+    return False, indexes
+
+
+def _prompt_autobalance_wallet_selection(config: dict) -> tuple[bool, list[str]]:
+    wallets = config.get("wallets") or []
+    if not wallets:
+        raise ValueError("No wallets are configured")
+
+    print()
+    print("Configured wallets:")
+    for index, wallet in enumerate(wallets):
+        print(f"  {_wallet_label(wallet, index)}")
+
+    while True:
+        choice = _prompt("Wallet numbers for autobalance, or all", "all")
+        try:
+            all_wallets, indexes = _parse_autobalance_wallet_choice(choice, len(wallets))
+        except ValueError as exc:
+            print(str(exc))
+            continue
+
+        if all_wallets:
+            return True, []
+        return False, _wallet_names_from_indexes(config, indexes)
+
+
+def _set_autobalance_wallets(config: dict, *, all_wallets: bool, wallet_names: list[str]) -> None:
+    autobalance = _ensure_autobalance_config(config)
+    autobalance["all_wallets"] = all_wallets
+    autobalance["wallets"] = [] if all_wallets else wallet_names
+
+
+def _apply_autobalance_wallet_args(config: dict, args: argparse.Namespace) -> bool:
+    if bool(getattr(args, "all", False)):
+        _set_autobalance_wallets(config, all_wallets=True, wallet_names=[])
+        return True
+
+    wallet_indexes = getattr(args, "wallet_index", None)
+    if wallet_indexes:
+        _set_autobalance_wallets(
+            config,
+            all_wallets=False,
+            wallet_names=_wallet_names_from_indexes(config, [int(index) for index in wallet_indexes]),
+        )
+        return True
+
+    return False
+
+
+def _save_autobalance_config(config_path: Path, config: dict) -> None:
+    save_config(config_path, config)
+    print(f"Wrote config to {config_path}")
+    print("Restart WWG after Autobalance changes so the running watcher picks them up:")
+    print("  docker compose restart wallet-watchguard")
+    print("If you run WWG locally, stop and start your `wwg run` process instead.")
 
 
 def _empty_wallet_stats(wallet_name: str) -> dict[str, int | str | None]:
@@ -1665,6 +1817,106 @@ def cmd_wallet_rename(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_autobalance(args: argparse.Namespace) -> int:
+    config_path = Path(args.config)
+    config = _load_config_for_persistent_tor_edit(config_path)
+    autobalance = _ensure_autobalance_config(config)
+    command = getattr(args, "autobalance_command", None)
+
+    if command is None:
+        choice = _prompt_choice(
+            "Autobalance configuration",
+            {
+                "1": "Turn Autobalance on",
+                "2": "Turn Autobalance off",
+                "3": "Show Autobalance status",
+                "4": "Choose Autobalance wallets",
+                "5": "Set Autobalance interval",
+                "6": "Cancel",
+            },
+            default="3",
+        )
+        command = {
+            "1": "on",
+            "2": "off",
+            "3": "status",
+            "4": "wallets",
+            "5": "interval",
+            "6": "cancel",
+        }[choice]
+
+    if command == "cancel":
+        print("No changes made.")
+        return 0
+
+    if command == "status":
+        _print_autobalance_status(config)
+        return 0
+
+    if command == "off":
+        autobalance["enabled"] = False
+        _save_autobalance_config(config_path, config)
+        print("Autobalance disabled.")
+        return 0
+
+    if command == "interval":
+        interval_hours = getattr(args, "hours", None) or getattr(args, "hours_flag", None)
+        if interval_hours is None:
+            interval_hours = _prompt_autobalance_interval(int(autobalance.get("interval_hours", 12)))
+        interval_hours = int(interval_hours)
+        if interval_hours < 1:
+            raise ValueError("Autobalance interval must be at least 1 hour")
+        autobalance["interval_hours"] = interval_hours
+        _save_autobalance_config(config_path, config)
+        print(f"Autobalance interval set to every {interval_hours} hour(s).")
+        return 0
+
+    if command == "wallets":
+        if not _apply_autobalance_wallet_args(config, args):
+            all_wallets, wallet_names = _prompt_autobalance_wallet_selection(config)
+            _set_autobalance_wallets(config, all_wallets=all_wallets, wallet_names=wallet_names)
+        _save_autobalance_config(config_path, config)
+        print(f"Autobalance wallets set to: {_autobalance_wallet_selection_text(config)}")
+        return 0
+
+    if command == "on":
+        explicitly_configured = _config_file_has_section(config_path, "autobalance")
+        provided_interval = getattr(args, "interval", None)
+        provided_wallets = bool(getattr(args, "all", False) or getattr(args, "wallet_index", None))
+
+        if provided_interval is not None:
+            interval_hours = int(provided_interval)
+            if interval_hours < 1:
+                raise ValueError("Autobalance interval must be at least 1 hour")
+            autobalance["interval_hours"] = interval_hours
+
+        if provided_wallets:
+            _apply_autobalance_wallet_args(config, args)
+
+        if not provided_interval and not provided_wallets and explicitly_configured:
+            print()
+            _print_autobalance_status(config)
+            if not _prompt_bool("Enable Autobalance with these existing settings", True):
+                autobalance["interval_hours"] = _prompt_autobalance_interval(int(autobalance.get("interval_hours", 12)))
+                all_wallets, wallet_names = _prompt_autobalance_wallet_selection(config)
+                _set_autobalance_wallets(config, all_wallets=all_wallets, wallet_names=wallet_names)
+        else:
+            if provided_interval is None:
+                autobalance["interval_hours"] = _prompt_autobalance_interval(int(autobalance.get("interval_hours", 12)))
+                if not provided_wallets and not explicitly_configured:
+                    all_wallets, wallet_names = _prompt_autobalance_wallet_selection(config)
+                    _set_autobalance_wallets(config, all_wallets=all_wallets, wallet_names=wallet_names)
+
+        autobalance = _ensure_autobalance_config(config)
+        autobalance["enabled"] = True
+        _save_autobalance_config(config_path, config)
+        print("Autobalance enabled.")
+        _print_autobalance_status(config)
+        return 0
+
+    raise ValueError(f"Unsupported Autobalance command: {command}")
+
+
 def cmd_next(args: argparse.Namespace) -> int:
     config = _runtime_config(load_config(args.config), args)
     passphrase = args.passphrase or get_passphrase_from_env_or_prompt()
@@ -1817,6 +2069,51 @@ def build_parser() -> argparse.ArgumentParser:
     p_status.add_argument("--no-emoji", action="store_true", help="Disable emoji in status output")
     _add_tor_upstream_arg(p_status)
     p_status.set_defaults(func=cmd_status)
+
+    autobalance_parent = argparse.ArgumentParser(add_help=False)
+    autobalance_parent.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+
+    p_autobalance = sub.add_parser(
+        "autobalance",
+        parents=[autobalance_parent],
+        help="Configure periodic ntfy wallet balance summaries",
+    )
+    autobalance_sub = p_autobalance.add_subparsers(dest="autobalance_command")
+    p_autobalance.set_defaults(func=cmd_autobalance)
+
+    p_autobalance_on = autobalance_sub.add_parser("on", parents=[autobalance_parent], help="Enable Autobalance")
+    p_autobalance_on.add_argument("--interval", type=int, default=None, help="Autobalance interval in hours")
+    p_autobalance_on.add_argument("--all", action="store_true", help="Send the combined balance for all wallets")
+    p_autobalance_on.add_argument(
+        "--wallet-index",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Send balances for one or more 1-based wallet indexes",
+    )
+    p_autobalance_on.set_defaults(func=cmd_autobalance)
+
+    p_autobalance_off = autobalance_sub.add_parser("off", parents=[autobalance_parent], help="Disable Autobalance")
+    p_autobalance_off.set_defaults(func=cmd_autobalance)
+
+    p_autobalance_status = autobalance_sub.add_parser("status", parents=[autobalance_parent], help="Show Autobalance status")
+    p_autobalance_status.set_defaults(func=cmd_autobalance)
+
+    p_autobalance_wallets = autobalance_sub.add_parser("wallets", parents=[autobalance_parent], help="Choose wallets for Autobalance")
+    p_autobalance_wallets.add_argument("--all", action="store_true", help="Send the combined balance for all wallets")
+    p_autobalance_wallets.add_argument(
+        "--wallet-index",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Send balances for one or more 1-based wallet indexes",
+    )
+    p_autobalance_wallets.set_defaults(func=cmd_autobalance)
+
+    p_autobalance_interval = autobalance_sub.add_parser("interval", parents=[autobalance_parent], help="Set the Autobalance interval")
+    p_autobalance_interval.add_argument("hours", nargs="?", type=int, default=None, help="Autobalance interval in hours")
+    p_autobalance_interval.add_argument("--hours", dest="hours_flag", type=int, default=None, help="Autobalance interval in hours")
+    p_autobalance_interval.set_defaults(func=cmd_autobalance)
 
     p_healthcheck = sub.add_parser(
         "healthcheck",

@@ -77,6 +77,30 @@ def _effective_socks_proxy(config: dict[str, Any]) -> str:
     return str(electrum.get("socks_proxy") or "").strip()
 
 
+def _autobalance_selection_text(config: dict[str, Any]) -> str:
+    autobalance = config.get("autobalance") or {}
+    if bool(autobalance.get("all_wallets", True)):
+        return "all wallets combined"
+
+    wallet_names = [str(name) for name in autobalance.get("wallets") or [] if str(name).strip()]
+    if not wallet_names:
+        return "no wallets selected"
+
+    return ", ".join(wallet_names)
+
+
+def autobalance_status_line(config: dict[str, Any], *, use_emoji: bool = True) -> str:
+    autobalance = config.get("autobalance") or {}
+    enabled = bool(autobalance.get("enabled", False))
+    interval_hours = int(autobalance.get("interval_hours", 12))
+    selection = _autobalance_selection_text(config)
+
+    if enabled:
+        return _label("Autobalance: enabled", "🚨", use_emoji=use_emoji) + f" every {interval_hours}h; wallets={selection}"
+
+    return _label("Autobalance: disabled", "🚨", use_emoji=use_emoji) + f"; wallets={selection}; interval={interval_hours}h"
+
+
 def electrum_upstream_lines(
     config: dict[str, Any],
     *,
@@ -214,6 +238,7 @@ def build_status_text(
         conversation_status = "disabled"
         conversation_extra = ""
     lines.append(f"{_label('Conversation Mode:', '🗣️ ', use_emoji=use_emoji)} {conversation_status}{conversation_extra}")
+    lines.append(autobalance_status_line(config, use_emoji=use_emoji))
 
     if subscription_count is None:
         lines.append(_label("Subscribed scripts: not connected in this status command", "📜", use_emoji=use_emoji))
