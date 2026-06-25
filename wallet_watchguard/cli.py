@@ -1092,12 +1092,69 @@ async def _purge_wallet_from_database_async(database_path: Path, wallet_name: st
         await db.close()
 
 
+async def _rename_wallet_in_database_async(database_path: Path, old_name: str, new_name: str) -> dict[str, int]:
+    if not database_path.exists():
+        return {
+            "watched_scripts": 0,
+            "utxos": 0,
+            "wallet_events": 0,
+        }
+
+    db = Database(database_path)
+    await db.connect()
+    try:
+        return await db.rename_wallet(old_name, new_name)
+    finally:
+        await db.close()
+
+
 def _remove_wallet_from_config(config: dict, wallet_name: str) -> int:
     wallets = config.get("wallets") or []
     remaining_wallets = [wallet for wallet in wallets if wallet.get("name") != wallet_name]
     removed_count = len(wallets) - len(remaining_wallets)
     config["wallets"] = remaining_wallets
     return removed_count
+
+
+def _select_wallet_for_rename(config: dict, args: argparse.Namespace) -> dict:
+    if args.wallet or args.wallet_index is not None:
+        return _select_one_wallet(config, args)
+
+    wallets = config.get("wallets") or []
+    if not wallets:
+        raise ValueError("No wallets are configured")
+
+    print()
+    print("Configured wallets:")
+    for index, wallet in enumerate(wallets):
+        print(f"  {_wallet_label(wallet, index)}")
+
+    while True:
+        choice = _prompt("Wallet number to rename", "1").strip()
+        try:
+            index = int(choice) - 1
+        except ValueError:
+            print("Please enter a wallet number.")
+            continue
+
+        if 0 <= index < len(wallets):
+            return wallets[index]
+
+        print(f"Please choose a number between 1 and {len(wallets)}.")
+
+
+def _rename_wallet_in_config(config: dict, wallet: dict, new_name: str) -> str:
+    new_name = new_name.strip()
+    if not new_name:
+        raise ValueError("Wallet name must not be blank")
+
+    old_name = str(wallet.get("name") or "")
+    for existing_wallet in config.get("wallets") or []:
+        if existing_wallet is not wallet and str(existing_wallet.get("name") or "").strip() == new_name:
+            raise ValueError(f"A wallet named {new_name!r} already exists")
+
+    wallet["name"] = new_name
+    return old_name
 
 
 def _empty_wallet_stats(wallet_name: str) -> dict[str, int | str | None]:
@@ -1585,6 +1642,29 @@ def cmd_wallet_remove(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_wallet_rename(args: argparse.Namespace) -> int:
+    config_path = Path(args.config)
+    config = load_config_for_edit(config_path)
+    wallet = _select_wallet_for_rename(config, args)
+    current_name = str(wallet["name"])
+    new_name = _prompt("New wallet name", current_name)
+
+    old_name = _rename_wallet_in_config(config, wallet, new_name)
+    database_path = _database_path_from_config(config)
+    renamed_rows = asyncio.run(_rename_wallet_in_database_async(database_path, old_name, str(wallet["name"])))
+
+    save_config(config_path, config)
+
+    print(f"Renamed wallet in config and database: {old_name} -> {wallet['name']}")
+    for table_name in ["watched_scripts", "utxos", "wallet_events"]:
+        print(f"  {table_name}: {renamed_rows.get(table_name, 0)}")
+    print()
+    print("Restart WWG after wallet or config changes so the running watcher picks them up:")
+    print("  docker compose restart wallet-watchguard")
+    print("If you run WWG locally, stop and start your `wwg run` process instead.")
+    return 0
+
+
 def cmd_next(args: argparse.Namespace) -> int:
     config = _runtime_config(load_config(args.config), args)
     passphrase = args.passphrase or get_passphrase_from_env_or_prompt()
@@ -1676,6 +1756,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_init.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt")
     p_init.set_defaults(func=cmd_init)
+
+    p_add_wallet = sub.add_parser("add-wallet", help="Add a wallet to the existing config")
+    p_add_wallet.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_add_wallet.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt")
+    p_add_wallet.set_defaults(func=cmd_init, reset=False, add="wallet")
 
     p_enc = sub.add_parser("encrypt-xpub", help="Encrypt an xpub for storage in YAML")
     p_enc.add_argument("--xpub", required=True)
@@ -1777,6 +1862,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_wallet_remove.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     p_wallet_remove.add_argument("--wallet-index", type=int, default=None, help="Remove wallet by its index in config")
     p_wallet_remove.set_defaults(func=cmd_wallet_remove)
+
+    p_wallet_rename = wallet_sub.add_parser("rename", help="Rename a wallet in config and database")
+    p_wallet_rename.add_argument(
+        "wallet",
+        nargs="?",
+        default=None,
+        help="Wallet name, or a unique partial name",
+    )
+    p_wallet_rename.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_wallet_rename.add_argument("--wallet-index", type=int, default=None, help="Rename wallet by its index in config")
+    p_wallet_rename.set_defaults(func=cmd_wallet_rename)
+
+    p_wallet_add = wallet_sub.add_parser("add", help="Add a wallet to the existing config")
+    p_wallet_add.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_wallet_add.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt")
+    p_wallet_add.set_defaults(func=cmd_init, reset=False, add="wallet")
 
     p_next = sub.add_parser(
         "next",
