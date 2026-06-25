@@ -283,6 +283,24 @@ class Database:
         await conn.commit()
         return deleted_rows
 
+    async def rename_wallet(self, old_name: str, new_name: str) -> dict[str, int]:
+        conn = self._conn()
+        renamed_rows = {
+            "watched_scripts": 0,
+            "utxos": 0,
+            "wallet_events": 0,
+        }
+
+        for table_name in ["watched_scripts", "utxos", "wallet_events"]:
+            cur = await conn.execute(
+                f"UPDATE {table_name} SET wallet_name = ? WHERE wallet_name = ?",
+                (new_name, old_name),
+            )
+            renamed_rows[table_name] = max(int(cur.rowcount or 0), 0)
+
+        await conn.commit()
+        return renamed_rows
+
     async def remember_history(self, scripthash: str, history: list[dict]) -> list[dict]:
         """Store history rows and return only newly seen tx entries."""
         conn = self._conn()

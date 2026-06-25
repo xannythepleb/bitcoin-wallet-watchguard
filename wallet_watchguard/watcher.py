@@ -55,6 +55,7 @@ class Watcher:
     async def run(self) -> None:
         listener: asyncio.Task | None = None
         conversation_task: asyncio.Task | None = None
+        autobalance_task: asyncio.Task | None = None
 
         await self.db.connect()
         try:
@@ -100,13 +101,23 @@ class Watcher:
                     print(f"Conversation Mode could not start: {exc}", flush=True)
                     print("Wallet Watchguard will continue monitoring wallets, but Conversation Mode is disabled.", flush=True)
 
+            if bool((self.config.get("autobalance") or {}).get("enabled", False)):
+                autobalance_task = asyncio.create_task(self._run_autobalance_loop())
+
             self._print_startup_summary()
             await asyncio.Event().wait()
         finally:
+            if autobalance_task is not None:
+                autobalance_task.cancel()
             if conversation_task is not None:
                 conversation_task.cancel()
             if listener is not None:
                 listener.cancel()
+            if autobalance_task is not None:
+                try:
+                    await autobalance_task
+                except asyncio.CancelledError:
+                    pass
             if conversation_task is not None:
                 try:
                     await conversation_task
@@ -474,6 +485,90 @@ class Watcher:
             await self.client.close()
             await self.db.close()
             await self.tor_upstream.stop()
+
+    def _autobalance_wallets(self) -> list[dict[str, Any]]:
+        autobalance = self.config.get("autobalance") or {}
+        wallets = list(self.config.get("wallets") or [])
+
+        if bool(autobalance.get("all_wallets", True)):
+            return wallets
+
+        selected_names = {str(name) for name in autobalance.get("wallets") or []}
+        return [wallet for wallet in wallets if str(wallet.get("name") or "") in selected_names]
+
+    async def _wallet_balance(self, wallet: dict[str, Any]) -> dict[str, int | str]:
+        confirmed = 0
+        unconfirmed = 0
+
+        for script in self._derive_wallet_scripts(wallet):
+            balance = await self.client.call("blockchain.scripthash.get_balance", [script.scripthash])
+            confirmed += int(balance.get("confirmed") or 0)
+            unconfirmed += int(balance.get("unconfirmed") or 0)
+
+        return {
+            "wallet_name": str(wallet["name"]),
+            "confirmed_sats": confirmed,
+            "unconfirmed_sats": unconfirmed,
+            "total_sats": confirmed + unconfirmed,
+        }
+
+    @staticmethod
+    def _format_sats(value: int) -> str:
+        return f"{value:,} sats"
+
+    async def _send_autobalance_notification(self) -> None:
+        wallets = self._autobalance_wallets()
+        if not wallets:
+            raise ValueError("Autobalance is enabled but no configured wallets matched the Autobalance wallet selection")
+
+        rows = [await self._wallet_balance(wallet) for wallet in wallets]
+        total_confirmed = sum(int(row["confirmed_sats"]) for row in rows)
+        total_unconfirmed = sum(int(row["unconfirmed_sats"]) for row in rows)
+        total = total_confirmed + total_unconfirmed
+
+        autobalance = self.config.get("autobalance") or {}
+        selection = "all wallets combined" if bool(autobalance.get("all_wallets", True)) else "selected wallets"
+
+        lines = [
+            "**Autobalance summary**",
+            f"**Scope:** {selection}",
+        ]
+
+        for row in rows:
+            wallet_total = int(row["total_sats"])
+            wallet_confirmed = int(row["confirmed_sats"])
+            wallet_unconfirmed = int(row["unconfirmed_sats"])
+            lines.append(
+                f"- **{row['wallet_name']}:** `{self._format_sats(wallet_total)}` "
+                f"confirmed=`{self._format_sats(wallet_confirmed)}` "
+                f"unconfirmed=`{self._format_sats(wallet_unconfirmed)}`"
+            )
+
+        lines.extend(
+            [
+                f"**Total:** `{self._format_sats(total)}`",
+                f"**Confirmed:** `{self._format_sats(total_confirmed)}`",
+                f"**Unconfirmed:** `{self._format_sats(total_unconfirmed)}`",
+            ]
+        )
+
+        await self.notifier.send(
+            "Wallet Watchguard: Autobalance",
+            "\n\n".join(lines),
+            tags="bitcoin,watch",
+        )
+
+    async def _run_autobalance_loop(self) -> None:
+        autobalance = self.config.get("autobalance") or {}
+        interval_hours = max(1, int(autobalance.get("interval_hours", 12)))
+        interval_seconds = interval_hours * 60 * 60
+
+        while True:
+            try:
+                await self._send_autobalance_notification()
+            except Exception as exc:
+                print(f"Autobalance notification failed: {exc}", flush=True)
+            await asyncio.sleep(interval_seconds)
 
     async def _notify_activity(self, event: WalletEvent, *, debug_latest: bool = False) -> None:
         if debug_latest:
