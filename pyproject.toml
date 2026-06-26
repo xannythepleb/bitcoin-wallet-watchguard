@@ -1,6 +1,6 @@
 [project]
 name = "wallet-watchguard"
-version = "0.2.1"
+version = "0.2.2"
 description = "Bitcoin Wallet Watchguard: Talk to your Bitcoin node via Electrum and Ntfy"
 requires-python = ">=3.12"
 dependencies = [

@@ -134,7 +134,10 @@ class ElectrumClient:
         self.writer.write(json.dumps(payload).encode("utf-8") + b"\n")
         await self.writer.drain()
 
-        return await asyncio.wait_for(fut, timeout=self.timeout_seconds)
+        try:
+            return await asyncio.wait_for(fut, timeout=self.timeout_seconds)
+        finally:
+            self._pending.pop(request_id, None)
 
     def _track_notification_task(self, task: asyncio.Task[None]) -> None:
         self._notification_tasks.add(task)
@@ -169,6 +172,8 @@ class ElectrumClient:
 
             if "id" in message and message["id"] in self._pending:
                 fut = self._pending.pop(message["id"])
+                if fut.done():
+                    continue
                 if message.get("error"):
                     fut.set_exception(ElectrumError(str(message["error"])))
                 else:

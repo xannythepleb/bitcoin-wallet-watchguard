@@ -29,15 +29,7 @@ class Watcher:
         database_path = app_config.get("database_path") or DEFAULT_DATABASE_PATH
         self.db = Database(database_path)
         
-        electrum = config["electrum"]
-        self.client = ElectrumClient(
-            electrum["host"],
-            int(electrum["port"]),
-            use_tls=bool(electrum.get("tls", True)),
-            tls_verify=electrum.get("tls_verify"),
-            socks_proxy=electrum.get("socks_proxy"),
-            timeout_seconds=int(electrum.get("timeout_seconds", 30)),
-        )
+        self.client = self._make_electrum_client()
         self.decrypted_ntfy_config = decrypt_ntfy_config(config["ntfy"], passphrase)
         self.notifier = NtfyNotifier(self.decrypted_ntfy_config)
         # Conversation Mode credentials are decrypted lazily, only when
@@ -51,6 +43,17 @@ class Watcher:
         self._subscription_count = 0
         self._conversation_started = False
         self._tor_connectivity_result: str | None = None
+
+    def _make_electrum_client(self) -> ElectrumClient:
+        electrum = self.config["electrum"]
+        return ElectrumClient(
+            electrum["host"],
+            int(electrum["port"]),
+            use_tls=bool(electrum.get("tls", True)),
+            tls_verify=electrum.get("tls_verify"),
+            socks_proxy=electrum.get("socks_proxy"),
+            timeout_seconds=int(electrum.get("timeout_seconds", 30)),
+        )
 
     async def run(self) -> None:
         listener: asyncio.Task | None = None
@@ -486,6 +489,150 @@ class Watcher:
             await self.db.close()
             await self.tor_upstream.stop()
 
+
+    async def live_debug_transaction_for_wallet(
+        self,
+        wallet: dict[str, Any],
+        *,
+        scan_limit: int | None = None,
+        debug_logger: Any | None = None,
+    ) -> dict[str, Any]:
+        """Replay one real wallet transaction through the live notification path.
+
+        This is intentionally different from notify_latest_transaction_for_wallet():
+        it clears the selected transaction from local live-notification dedupe
+        state, then calls _process_scripthash_update(..., notify_new_items=True)
+        so the same database/history/event/ntfy path is exercised as a real
+        Electrum subscription notification.
+        """
+
+        async def ignore_notifications(message: dict[str, Any]) -> None:
+            if debug_logger is not None:
+                debug_logger(f"ignored Electrum notification during live-debug replay: {message}")
+
+        def debug(message: str) -> None:
+            if debug_logger is not None:
+                debug_logger(message)
+
+        listener_task: asyncio.Task | None = None
+        await self.db.connect()
+        try:
+            await self.tor_upstream.start()
+            await self.client.connect()
+            listener_task = asyncio.create_task(self.client.listen(ignore_notifications))
+
+            lookahead = int(scan_limit or wallet.get("lookahead") or self.config["app"].get("lookahead", 100))
+            scripts = self._derive_wallet_scripts(wallet, lookahead=lookahead)
+            await self.db.upsert_watched_scripts(scripts)
+
+            debug("Live notification replay debug")
+            debug(f"wallet={wallet['name']!r} network={wallet['network']} wallet_type={wallet['wallet_type']}")
+            debug(f"lookahead={lookahead}; derived_scripts={len(scripts)}")
+
+            latest: tuple[tuple[int, int], dict[str, Any], DerivedAddress] | None = None
+            scripts_with_history = 0
+            total_history_entries = 0
+
+            for script in scripts:
+                history = await self.client.call("blockchain.scripthash.get_history", [script.scripthash])
+                history_count = len(history)
+                total_history_entries += history_count
+                if not history:
+                    continue
+
+                scripts_with_history += 1
+                debug(
+                    f"history found: path={script.path} address={script.address} "
+                    f"scripthash={script.scripthash} entries={history_count}"
+                )
+
+                for item in history:
+                    candidate = (self._history_sort_key(item), item, script)
+                    if latest is None or candidate[0] > latest[0]:
+                        latest = candidate
+
+            debug(
+                f"history scan complete: scripts_with_history={scripts_with_history}; "
+                f"total_history_entries={total_history_entries}"
+            )
+
+            if latest is None:
+                raise ValueError(
+                    f"No transaction history found for wallet {wallet['name']!r} within lookahead {lookahead}."
+                )
+
+            _, latest_item, script = latest
+            txid = str(latest_item["tx_hash"])
+            height = int(latest_item.get("height", 0) or 0)
+            watched = await self.db.get_watched_script(script.scripthash)
+            if watched is None:
+                raise ValueError(f"Selected script was not found in the local database: {script.scripthash}")
+
+            debug(
+                f"selected replay transaction: txid={txid} height={height} "
+                f"path={script.path} address={script.address} scripthash={script.scripthash}"
+            )
+
+            current_status = await self.client.call("blockchain.scripthash.subscribe", [script.scripthash])
+            state_before = await self.db.get_scripthash_state(script.scripthash)
+            app_config = self.config.get("app") or {}
+            debug(f"current Electrum subscription status={current_status!r}")
+            debug(
+                "local state before replay: "
+                f"last_status={state_before['last_status']!r}; history_count={state_before['history_count']}"
+            )
+            debug(
+                "notification config: "
+                f"notify_on_mempool={bool(app_config.get('notify_on_mempool', True))}; "
+                f"notify_on_confirmed={bool(app_config.get('notify_on_confirmed', True))}"
+            )
+
+            deleted_rows = await self.db.forget_transaction_for_live_debug(
+                str(wallet["name"]),
+                script.scripthash,
+                txid,
+            )
+            debug(
+                "cleared selected transaction from live-notification dedupe state: "
+                f"tx_history={deleted_rows.get('tx_history', 0)}; "
+                f"wallet_events={deleted_rows.get('wallet_events', 0)}"
+            )
+            debug("calling live path: _process_scripthash_update(..., notify_new_items=True)")
+
+            processed_items = await self._process_scripthash_update(
+                script.scripthash,
+                current_status,
+                notify_new_items=True,
+            )
+            state_after = await self.db.get_scripthash_state(script.scripthash)
+            debug(f"live path completed: processed_new_or_changed_history_items={processed_items}")
+            debug(
+                "local state after replay: "
+                f"last_status={state_after['last_status']!r}; history_count={state_after['history_count']}"
+            )
+
+            return {
+                "wallet_name": str(wallet["name"]),
+                "txid": txid,
+                "height": height,
+                "path": script.path,
+                "address": script.address,
+                "scripthash": script.scripthash,
+                "status": current_status,
+                "deleted_rows": deleted_rows,
+                "processed_items": processed_items,
+            }
+        finally:
+            if listener_task is not None:
+                listener_task.cancel()
+                try:
+                    await listener_task
+                except asyncio.CancelledError:
+                    pass
+            await self.client.close()
+            await self.db.close()
+            await self.tor_upstream.stop()
+
     def _autobalance_wallets(self) -> list[dict[str, Any]]:
         autobalance = self.config.get("autobalance") or {}
         wallets = list(self.config.get("wallets") or [])
@@ -496,12 +643,12 @@ class Watcher:
         selected_names = {str(name) for name in autobalance.get("wallets") or []}
         return [wallet for wallet in wallets if str(wallet.get("name") or "") in selected_names]
 
-    async def _wallet_balance(self, wallet: dict[str, Any]) -> dict[str, int | str]:
+    async def _wallet_balance(self, wallet: dict[str, Any], client: ElectrumClient) -> dict[str, int | str]:
         confirmed = 0
         unconfirmed = 0
 
         for script in self._derive_wallet_scripts(wallet):
-            balance = await self.client.call("blockchain.scripthash.get_balance", [script.scripthash])
+            balance = await client.call("blockchain.scripthash.get_balance", [script.scripthash])
             confirmed += int(balance.get("confirmed") or 0)
             unconfirmed += int(balance.get("unconfirmed") or 0)
 
@@ -521,7 +668,24 @@ class Watcher:
         if not wallets:
             raise ValueError("Autobalance is enabled but no configured wallets matched the Autobalance wallet selection")
 
-        rows = [await self._wallet_balance(wallet) for wallet in wallets]
+        async def ignore_notifications(message: dict[str, Any]) -> None:
+            _ = message
+
+        client = self._make_electrum_client()
+        listener_task: asyncio.Task | None = None
+        try:
+            await client.connect()
+            listener_task = asyncio.create_task(client.listen(ignore_notifications))
+            rows = [await self._wallet_balance(wallet, client) for wallet in wallets]
+        finally:
+            if listener_task is not None:
+                listener_task.cancel()
+                try:
+                    await listener_task
+                except asyncio.CancelledError:
+                    pass
+            await client.close()
+
         total_confirmed = sum(int(row["confirmed_sats"]) for row in rows)
         total_unconfirmed = sum(int(row["unconfirmed_sats"]) for row in rows)
         total = total_confirmed + total_unconfirmed
