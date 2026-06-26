@@ -29,15 +29,7 @@ class Watcher:
         database_path = app_config.get("database_path") or DEFAULT_DATABASE_PATH
         self.db = Database(database_path)
         
-        electrum = config["electrum"]
-        self.client = ElectrumClient(
-            electrum["host"],
-            int(electrum["port"]),
-            use_tls=bool(electrum.get("tls", True)),
-            tls_verify=electrum.get("tls_verify"),
-            socks_proxy=electrum.get("socks_proxy"),
-            timeout_seconds=int(electrum.get("timeout_seconds", 30)),
-        )
+        self.client = self._make_electrum_client()
         self.decrypted_ntfy_config = decrypt_ntfy_config(config["ntfy"], passphrase)
         self.notifier = NtfyNotifier(self.decrypted_ntfy_config)
         # Conversation Mode credentials are decrypted lazily, only when
@@ -51,6 +43,17 @@ class Watcher:
         self._subscription_count = 0
         self._conversation_started = False
         self._tor_connectivity_result: str | None = None
+
+    def _make_electrum_client(self) -> ElectrumClient:
+        electrum = self.config["electrum"]
+        return ElectrumClient(
+            electrum["host"],
+            int(electrum["port"]),
+            use_tls=bool(electrum.get("tls", True)),
+            tls_verify=electrum.get("tls_verify"),
+            socks_proxy=electrum.get("socks_proxy"),
+            timeout_seconds=int(electrum.get("timeout_seconds", 30)),
+        )
 
     async def run(self) -> None:
         listener: asyncio.Task | None = None
@@ -496,12 +499,12 @@ class Watcher:
         selected_names = {str(name) for name in autobalance.get("wallets") or []}
         return [wallet for wallet in wallets if str(wallet.get("name") or "") in selected_names]
 
-    async def _wallet_balance(self, wallet: dict[str, Any]) -> dict[str, int | str]:
+    async def _wallet_balance(self, wallet: dict[str, Any], client: ElectrumClient) -> dict[str, int | str]:
         confirmed = 0
         unconfirmed = 0
 
         for script in self._derive_wallet_scripts(wallet):
-            balance = await self.client.call("blockchain.scripthash.get_balance", [script.scripthash])
+            balance = await client.call("blockchain.scripthash.get_balance", [script.scripthash])
             confirmed += int(balance.get("confirmed") or 0)
             unconfirmed += int(balance.get("unconfirmed") or 0)
 
@@ -521,7 +524,24 @@ class Watcher:
         if not wallets:
             raise ValueError("Autobalance is enabled but no configured wallets matched the Autobalance wallet selection")
 
-        rows = [await self._wallet_balance(wallet) for wallet in wallets]
+        async def ignore_notifications(message: dict[str, Any]) -> None:
+            _ = message
+
+        client = self._make_electrum_client()
+        listener_task: asyncio.Task | None = None
+        try:
+            await client.connect()
+            listener_task = asyncio.create_task(client.listen(ignore_notifications))
+            rows = [await self._wallet_balance(wallet, client) for wallet in wallets]
+        finally:
+            if listener_task is not None:
+                listener_task.cancel()
+                try:
+                    await listener_task
+                except asyncio.CancelledError:
+                    pass
+            await client.close()
+
         total_confirmed = sum(int(row["confirmed_sats"]) for row in rows)
         total_unconfirmed = sum(int(row["unconfirmed_sats"]) for row in rows)
         total = total_confirmed + total_unconfirmed
