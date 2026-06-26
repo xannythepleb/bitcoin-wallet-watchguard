@@ -1143,6 +1143,36 @@ def _select_wallet_for_rename(config: dict, args: argparse.Namespace) -> dict:
         print(f"Please choose a number between 1 and {len(wallets)}.")
 
 
+
+def _select_wallet_for_live_debug(config: dict, args: argparse.Namespace) -> dict:
+    if args.wallet or args.wallet_index is not None:
+        return _select_one_wallet(config, args)
+
+    wallets = config.get("wallets") or []
+    if not wallets:
+        raise ValueError("No wallets are configured")
+
+    if len(wallets) == 1:
+        return wallets[0]
+
+    print()
+    print("Configured wallets:")
+    for index, wallet in enumerate(wallets):
+        print(f"  {_wallet_label(wallet, index)}")
+
+    while True:
+        choice = _prompt("Wallet number for live debug", "1").strip()
+        try:
+            index = int(choice) - 1
+        except ValueError:
+            print("Please enter a wallet number.")
+            continue
+
+        if 0 <= index < len(wallets):
+            return wallets[index]
+
+        print(f"Please choose a number between 1 and {len(wallets)}.")
+
 def _rename_wallet_in_config(config: dict, wallet: dict, new_name: str) -> str:
     new_name = new_name.strip()
     if not new_name:
@@ -1415,6 +1445,29 @@ async def _cmd_notify_latest_tx_async(config: dict, passphrase: str, args: argpa
         f"latest transaction debug notification sent for {event.wallet_name}: "
         f"{event.txid} ({event.event_type}, {event.status}){amount}"
     )
+
+
+async def _cmd_live_debug_async(config: dict, passphrase: str, args: argparse.Namespace) -> None:
+    def debug(message: str) -> None:
+        print(f"debug: {message}")
+
+    wallet = _select_wallet_for_live_debug(config, args)
+    scan_limit = int(args.limit) if getattr(args, "limit", None) is not None else None
+    watcher = Watcher(config, passphrase, config_path=getattr(args, "config", None))
+    result = await watcher.live_debug_transaction_for_wallet(
+        wallet,
+        scan_limit=scan_limit,
+        debug_logger=debug,
+    )
+
+    print()
+    print("Live debug replay completed.")
+    print(f"Wallet: {result['wallet_name']}")
+    print(f"Transaction: {result['txid']}")
+    print(f"Path: {result['path']}")
+    print(f"Address: {result['address']}")
+    print(f"Processed new/changed history items: {result['processed_items']}")
+    print("If ntfy credentials were valid and notification settings allowed this transaction status, a normal live notification was sent.")
 
 
 async def _cmd_addresses_async(config: dict, passphrase: str, args: argparse.Namespace) -> None:
@@ -1917,6 +1970,13 @@ def cmd_autobalance(args: argparse.Namespace) -> int:
     raise ValueError(f"Unsupported Autobalance command: {command}")
 
 
+def cmd_live_debug(args: argparse.Namespace) -> int:
+    config = _runtime_config(load_config(args.config), args)
+    passphrase = args.passphrase or get_passphrase_from_env_or_prompt()
+    asyncio.run(_cmd_live_debug_async(config, passphrase, args))
+    return 0
+
+
 def cmd_next(args: argparse.Namespace) -> int:
     config = _runtime_config(load_config(args.config), args)
     passphrase = args.passphrase or get_passphrase_from_env_or_prompt()
@@ -2045,6 +2105,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_test.add_argument("--debug", action="store_true", help="Latest-tx debug: print derivation/history diagnostics to stderr")
     _add_tor_upstream_arg(p_test)
     p_test.set_defaults(func=cmd_test_ntfy)
+
+
+    p_live_debug = sub.add_parser(
+        "live-debug",
+        help="Replay one wallet transaction through the live notification pipeline",
+    )
+    p_live_debug.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_live_debug.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt/env")
+    p_live_debug.add_argument("--wallet", default=None, help="Choose wallet by exact name or unique partial name")
+    p_live_debug.add_argument("--wallet-index", type=int, default=None, help="Choose wallet by its 1-based index in config")
+    p_live_debug.add_argument("--limit", type=int, default=None, help="Addresses per branch to scan; defaults to wallet/app lookahead")
+    _add_tor_upstream_arg(p_live_debug)
+    p_live_debug.set_defaults(func=cmd_live_debug)
 
     p_addr = sub.add_parser(
         "addresses",

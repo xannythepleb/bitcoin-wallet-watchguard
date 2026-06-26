@@ -301,6 +301,29 @@ class Database:
         await conn.commit()
         return renamed_rows
 
+
+    async def forget_transaction_for_live_debug(self, wallet_name: str, scripthash: str, txid: str) -> dict[str, int]:
+        conn = self._conn()
+        deleted_rows = {
+            "tx_history": 0,
+            "wallet_events": 0,
+        }
+
+        cur = await conn.execute(
+            "DELETE FROM tx_history WHERE scripthash = ? AND txid = ?",
+            (scripthash, txid),
+        )
+        deleted_rows["tx_history"] = max(int(cur.rowcount or 0), 0)
+
+        cur = await conn.execute(
+            "DELETE FROM wallet_events WHERE wallet_name = ? AND txid = ?",
+            (wallet_name, txid),
+        )
+        deleted_rows["wallet_events"] = max(int(cur.rowcount or 0), 0)
+
+        await conn.commit()
+        return deleted_rows
+
     async def remember_history(self, scripthash: str, history: list[dict]) -> list[dict]:
         """Store history rows and return only newly seen tx entries."""
         conn = self._conn()
