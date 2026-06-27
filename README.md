@@ -116,46 +116,46 @@ Whenever a transaction occurs, you will be notified via Ntfy.
 If you have Mempool integration configured correctly, you will get extra details about the transaction like so:
 
 ```
-**Wallet:** Jade Cold Wallet
+Wallet: Jade Cold Wallet
 
-**Type:** received
+Type: received
 
-**Status:** unconfirmed/mempool
+Status: unconfirmed/mempool
 
-**Amount:** +69,420 sats
+Amount: +69,420 sats
 
-**vsize:** 420 vB
+vsize: 420 vB
 
-**Fee rate:** 2.67 sat/vB
+Fee rate: 2.67 sat/vB
 
-**Inputs:**
+Inputs:
 
 * bc1q67xanz...
 * bc1p420asd...
 
-**Outputs:**
+Outputs:
 
 * ✅ bc1p999tap... - 69,418 sats
 
-**Wallet path:** m/86'/0'/0'/0/4
+Wallet path: m/86'/0'/0'/0/4
 
-**Tx:** abc123...
+Tx: abc123...
 ```
 
 Without Mempool, you will get a simpler notification:
 
 ```
-**Wallet:** Jade Cold Wallet
+Wallet: Jade Cold Wallet
 
-**Type:** activity
+Type: activity
 
-**Status:** confirmed at height 9999999
+Status: confirmed at height 9999999
 
-**Address:** bc1p999tap...
+Address: bc1p999tap...
 
-**Wallet path:** m/86'/0'/0'/0/4
+Wallet path: m/86'/0'/0'/0/4
 
-**Tx:** abc123...
+Tx: abc123...
 ```
 
 As you can see, Mempool allows WWG to pick up the amount, whether it was sent or received, details of the input and output, and fee paid. Instructions on how to configure Mempool integration are further down.
