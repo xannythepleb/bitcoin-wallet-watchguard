@@ -65,6 +65,8 @@ wwg init --add app
 wwg init --reset
 ```
 
+If the config already exists, `wwg init` asks whether to update part of the config, reset it, or exit.
+
 ### Docker Images
 
 Wallet Watchguard publishes Docker images to GitHub automatically. Images are built and pushed when a new version is released.
@@ -98,7 +100,7 @@ It is also much easier to uninstall a Docker container fully if you decide you w
 
 **This guide and the example commands it provides will assume you are using Docker Compose as this is the recommended install method. Adjust accordingly if you aren't.**
 
-## Examples of CLI functionality
+## Examples of CLI Functionality
 
 To run commands, e.g. `status`:
 
@@ -129,8 +131,6 @@ docker compose exec wallet-watchguard wwg wallet add
 docker compose exec wallet-watchguard wwg wallet remove
 docker compose exec wallet-watchguard wwg wallet rename
 ```
-
-If the config already exists, `wwg init` asks whether to update part of the config, reset it, or exit.
 
 You can get plain output from commands such as `wwg next` and `wwg request` for use in scripts, allowing you to use WWG as a tool for automating your own Bitcoin workflow or projects.
 
