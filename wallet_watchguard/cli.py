@@ -153,21 +153,71 @@ def _config_has_encrypted_values(config: dict) -> bool:
     return False
 
 
-def _get_encryption_passphrase(args: argparse.Namespace, *, existing_secret: bool) -> str:
-    if getattr(args, "passphrase", None):
-        return args.passphrase
+def _validate_existing_passphrase(config: dict, passphrase: str) -> None:
+    """Confirm that a passphrase can decrypt existing encrypted config values.
 
-    if existing_secret:
+    This prevents accidentally encrypting newly-added wallets with a typoed
+    passphrase, which would leave a config containing secrets encrypted with
+    different passphrases.
+    """
+    checked_any = False
+
+    for index, wallet in enumerate(config.get("wallets") or []):
+        if not wallet.get("encrypted_xpub"):
+            continue
+
+        checked_any = True
+        wallet_name = str(wallet.get("name") or f"wallet #{index + 1}")
+        try:
+            decrypt_xpub_with_passphrase(
+                encrypted_xpub_b64=wallet["encrypted_xpub"],
+                passphrase=passphrase,
+                metadata=metadata_from_config(wallet["xpub_encryption"]),
+            )
+        except Exception as exc:
+            raise ValueError(
+                f"Passphrase incorrect. No changes were made."
+            ) from exc
+
+    ntfy_auth = (config.get("ntfy") or {}).get("auth") or {}
+    if ntfy_auth.get("encrypted_token") or ntfy_auth.get("encrypted_password"):
+        checked_any = True
+        try:
+            decrypt_ntfy_config(config["ntfy"], passphrase)
+        except Exception as exc:
+            raise ValueError("Passphrase did not decrypt existing ntfy credentials. No changes were made.") from exc
+
+    if not checked_any and _config_has_encrypted_values(config):
+        print(
+            "warning: existing encrypted values were found, but this command could not validate them before continuing.",
+            file=sys.stderr,
+        )
+
+
+def _get_encryption_passphrase(
+    args: argparse.Namespace,
+    *,
+    existing_secret: bool,
+    config: dict | None = None,
+) -> str:
+    if getattr(args, "passphrase", None):
+        passphrase = args.passphrase
+    elif existing_secret:
         print()
         print("Enter the existing Wallet Watchguard encryption passphrase.")
         print("New sensitive values will be encrypted with the same passphrase.")
-        return prompt_existing_passphrase()
+        passphrase = prompt_existing_passphrase()
+    else:
+        print()
+        print("Set the passphrase used to encrypt sensitive values in config.yaml.")
+        print("This passphrase encrypts your xpub and ntfy credentials at rest.")
+        print("You will need it whenever Wallet Watchguard starts.")
+        passphrase = prompt_new_passphrase()
 
-    print()
-    print("Set the passphrase used to encrypt sensitive values in config.yaml.")
-    print("This passphrase encrypts your xpub and ntfy credentials at rest.")
-    print("You will need it whenever Wallet Watchguard starts.")
-    return prompt_new_passphrase()
+    if existing_secret and config is not None:
+        _validate_existing_passphrase(config, passphrase)
+
+    return passphrase
 
 
 def _server_from_ntfy_publish_url(publish_url: str, topic: str) -> str:
@@ -740,7 +790,7 @@ def _prompt_wallet_config(passphrase: str) -> dict[str, object]:
 
 
 def _apply_full_setup(config: dict, args: argparse.Namespace, *, existing_secret: bool) -> dict:
-    passphrase = _get_encryption_passphrase(args, existing_secret=existing_secret)
+    passphrase = _get_encryption_passphrase(args, existing_secret=existing_secret, config=config)
     config["app"] = _prompt_app_config(config.get("app"))
     config["electrum"] = _prompt_electrum_config(config.get("electrum"))
     config["ntfy"] = _prompt_ntfy_config(passphrase, config.get("ntfy"))
@@ -772,17 +822,17 @@ def _apply_section(config: dict, section: str, args: argparse.Namespace) -> dict
         return config
 
     if section == "conversation":
-        passphrase = _get_encryption_passphrase(args, existing_secret=_config_has_encrypted_values(config))
+        passphrase = _get_encryption_passphrase(args, existing_secret=_config_has_encrypted_values(config), config=config)
         config["conversation"] = _prompt_conversation_config(passphrase, config.get("conversation"), config.get("ntfy"))
         return config
 
     if section == "ntfy":
-        passphrase = _get_encryption_passphrase(args, existing_secret=_config_has_encrypted_values(config))
+        passphrase = _get_encryption_passphrase(args, existing_secret=_config_has_encrypted_values(config), config=config)
         config["ntfy"] = _prompt_ntfy_config(passphrase, config.get("ntfy"))
         return config
 
     if section == "wallet":
-        passphrase = _get_encryption_passphrase(args, existing_secret=_config_has_encrypted_values(config))
+        passphrase = _get_encryption_passphrase(args, existing_secret=_config_has_encrypted_values(config), config=config)
         config.setdefault("wallets", [])
         config["wallets"].append(_prompt_wallet_config(passphrase))
         return config
