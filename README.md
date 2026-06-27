@@ -190,11 +190,11 @@ QR code:
 
 These QR codes are extremely clear and readable even within a terminal:
 
-<img width="1167" height="800" alt="image" src="https://github.com/user-attachments/assets/1a94f40c-f3a3-4882-8a10-b96f9d948774" />
+<img width="584" height="400" alt="image" src="https://github.com/user-attachments/assets/1a94f40c-f3a3-4882-8a10-b96f9d948774" />
 
 When scanned, you will get something like this on your mobile Bitcoin wallet (UX varies by wallet, of course):
 
-<img width="1290" height="1436" alt="image" src="https://github.com/user-attachments/assets/c0a676e8-ac0d-4582-9d6f-ecb2d70c315b" />
+<img width="645" height="718" alt="image" src="https://github.com/user-attachments/assets/c0a676e8-ac0d-4582-9d6f-ecb2d70c315b" />
 
 QR codes are also generated when you run `wwg next` to get a new unused Bitcoin address. These do not include amounts or messages, just the address. If you don't want the QR codes when running `wwg next`, you can simply add the `--no-qr` flag, or use `--plain` to get only the address and nothing else, useful for variables and scripting.
 
