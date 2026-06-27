@@ -122,7 +122,7 @@ docker compose exec wallet-watchguard wwg status
 docker compose exec wallet-watchguard wwg balance
 ## Show next unused address from one of your wallets with QR code
 docker compose exec wallet-watchguard wwg next
-## Create QR code to request sats with optional message
+## Generate QR code to request Bitcoin with optional message, enter amount in either sats or BTC
 docker compose ecec wallet-watchguard wwg request
 ## Add, remove, or rename a wallet
 docker compose exec wallet-watchguard wwg wallet add
