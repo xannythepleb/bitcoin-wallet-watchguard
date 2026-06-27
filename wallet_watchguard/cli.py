@@ -67,8 +67,12 @@ def _parse_address_count(raw: str | None) -> int:
         return 1
 
 
+def _should_use_plain_next_output(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "plain", False)) or not sys.stdout.isatty()
+
+
 def _should_print_terminal_qr(args: argparse.Namespace) -> bool:
-    return not bool(getattr(args, "no_qr", False)) and sys.stdout.isatty()
+    return not _should_use_plain_next_output(args) and not bool(getattr(args, "no_qr", False))
 
 
 def _print_terminal_qr(value: str) -> None:
@@ -1645,6 +1649,19 @@ async def _cmd_next_async(config: dict, passphrase: str, args: argparse.Namespac
                     if len(found) >= count:
                         break
 
+            if _should_use_plain_next_output(args):
+                if not found:
+                    print(
+                        f"No unused receive address found within lookahead {scan_limit} for wallet: {wallet['name']}",
+                        file=sys.stderr,
+                    )
+                    print("Increase the wallet lookahead or check the wallet derivation path.", file=sys.stderr)
+                    continue
+
+                for item in found:
+                    print(item.address)
+                continue
+
             print()
             print(f"Wallet: {wallet['name']} ({wallet['network']} / {wallet['wallet_type']})")
             if not found:
@@ -2287,6 +2304,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_next.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt/env")
     p_next.add_argument("--wallet", default=None, help="Only use one wallet by exact name or unique partial name")
     p_next.add_argument("--wallet-index", type=int, default=None, help="Only use one wallet by its 1-based index in config")
+    p_next.add_argument(
+        "--plain",
+        "--address-only",
+        action="store_true",
+        help="Print only address strings, one per line; useful for scripts and command substitution",
+    )
     p_next.add_argument("--no-qr", action="store_true", help="Do not print a terminal QR code for the address")
     _add_tor_upstream_arg(p_next)
     p_next.set_defaults(func=cmd_next)
