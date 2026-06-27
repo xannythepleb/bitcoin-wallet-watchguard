@@ -347,17 +347,14 @@ def _prompt_app_config(existing_app: dict | None = None) -> dict[str, object]:
     print()
     print("Application settings")
 
-    # Config and database locations are now standardised by the app defaults and
-    # Docker volume layout, so the setup wizard no longer asks users to choose a
-    # database path. Preserve any existing value when updating an older config,
-    # otherwise use the current default.
+    # Config, database and derivation-helper locations are now standardised by the
+    # app defaults and Docker volume layout, so the setup wizard no longer asks users
+    # to choose those paths. Preserve any existing values when updating an older
+    # config, otherwise use the current defaults.
     return {
         "name": existing_app.get("name", "Bitcoin Wallet Watchguard"),
         "database_path": str(existing_app.get("database_path") or DEFAULT_DATABASE_PATH),
-        "derivation_helper_path": _prompt(
-            "Rust derivation helper path",
-            str(existing_app.get("derivation_helper_path", "./wwg-derive")),
-        ),
+        "derivation_helper_path": str(existing_app.get("derivation_helper_path") or "./wwg-derive"),
         "lookahead": int(_prompt("Default lookahead", str(existing_app.get("lookahead", 100)))),
         "notify_on_mempool": _prompt_bool(
             "Notify on mempool/unconfirmed transactions",
