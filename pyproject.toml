@@ -26,5 +26,5 @@ include = ["wallet_watchguard*"]
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
-    "ruff>=0.15.18",
+    "ruff>=0.15.20",
 ]
