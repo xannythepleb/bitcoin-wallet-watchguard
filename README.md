@@ -28,11 +28,11 @@ wwg run
 ### Docker Compose
 
 ```bash
-git clone https://github.com/xannythepleb/bitcoin-wallet-watchguard.git
-cd bitcoin-wallet-watchguard
+mkdir bitcoin-wallet-watchguard && cd bitcoin-wallet-watchguard
+curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/xannythepleb/bitcoin-wallet-watchguard/refs/heads/main/docker-compose.yml
 docker compose pull
-docker compose up -d
 docker compose run --rm wallet-watchguard wwg init
+docker compose up -d
 ```
 
 To launch in the future:
@@ -42,6 +42,34 @@ WWG_PASSPHRASE='your passphrase here' docker compose up -d
 ```
 
 You can choose to store your `WWG_PASSPHRASE` in your `.env` for convenience, with obvious security tradeoffs.
+
+To run commands, e.g. `status`:
+
+```bash
+docker compose exec wallet-watchguard wwg status
+```
+
+Note the distinction between how we run the Docker Compose container during `init` and after setup is complete:
+
+```bash
+# First time setup
+docker compose run --rm wallet-watchguard wwg init
+
+# Start the daemon
+docker compose up -d
+
+# Example usage commands
+## Check status of WWG
+docker compose exec wallet-watchguard wwg status
+## Check balance of your wallets
+docker compose exec wallet-watchguard wwg balance
+## Show next unused address from one of your wallets
+docker compose exec wallet-watchguard wwg next
+## Add, remove, or rename a wallet
+docker compose exec wallet-watchguard wwg wallet add
+docker compose exec wallet-watchguard wwg wallet remove
+docker compose exec wallet-watchguard wwg wallet rename
+```
 
 If the config already exists, `wwg init` asks whether to update part of the config, reset it, or exit.
 
@@ -72,6 +100,8 @@ Or:
 ```bash
 docker run ghcr.io/xannythepleb/bitcoin-wallet-watchguard:latest wwg init
 ```
+
+We recommend using Docker Compose as described above. It is the simplest way to install WWG: simply download `docker-compose.yml` into the `bitcoin-wallet-watchguard` directory (or whatever you want to name it) then run `docker compose pull` to automatically grab the latest stable image.
 
 ## Conversation Mode: Talk to Your Wallet Anywhere
 
