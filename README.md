@@ -35,6 +35,12 @@ docker compose run --rm wallet-watchguard wwg init
 docker compose up -d
 ```
 
+Alternatively, if you prefer `wget`:
+
+```bash
+wget -O docker-compose.yml https://raw.githubusercontent.com/xannythepleb/bitcoin-wallet-watchguard/refs/heads/main/docker-compose.yml
+```
+
 To launch in the future:
 
 ```bash
