@@ -53,37 +53,7 @@ WWG_PASSPHRASE='your passphrase here' docker compose up -d
 
 You can choose to store your `WWG_PASSPHRASE` in your `.env` for convenience, especially seamless restarts, with obvious security tradeoffs.
 
-To run commands, e.g. `status`:
-
-```bash
-docker compose exec wallet-watchguard wwg status
-```
-
-Note the distinction between how we run the Docker Compose container during `init` and after setup is complete:
-
-```bash
-# First time setup - docker compose run --rm to create a temporary container that launches the onboarding wizard to create your config
-docker compose run --rm wallet-watchguard wwg init
-
-# Start the daemon
-docker compose up -d
-
-# Example usage commands - docker compose exec to run commands inside the daemon
-## Check status of WWG
-docker compose exec wallet-watchguard wwg status
-## Check balance of your wallets
-docker compose exec wallet-watchguard wwg balance
-## Show next unused address from one of your wallets
-docker compose exec wallet-watchguard wwg next
-## Add, remove, or rename a wallet
-docker compose exec wallet-watchguard wwg wallet add
-docker compose exec wallet-watchguard wwg wallet remove
-docker compose exec wallet-watchguard wwg wallet rename
-```
-
-If the config already exists, `wwg init` asks whether to update part of the config, reset it, or exit.
-
-You can jump directly to a section:
+Don't stress if you got something wrong during the initial configuration or need to change something later. You can jump directly to an `init` section to alter your configuration whenever you need:
 
 ```bash
 wwg init --add ntfy
@@ -127,6 +97,120 @@ We only recommend using a local install unless you really really don't like Dock
 It is also much easier to uninstall a Docker container fully if you decide you want to (although we hope you don't) as all the dependencies are inside the container.
 
 **This guide and the example commands it provides will assume you are using Docker Compose as this is the recommended install method. Adjust accordingly if you aren't.**
+
+## Examples of CLI functionality
+
+To run commands, e.g. `status`:
+
+```bash
+docker compose exec wallet-watchguard wwg status
+```
+
+Note the distinction between how we run the Docker Compose container during `init` and after setup is complete:
+
+```bash
+# First time setup - docker compose run --rm to create a temporary container that launches the onboarding wizard to create your config
+docker compose run --rm wallet-watchguard wwg init
+
+# Start the daemon
+docker compose up -d
+
+# Example usage commands - docker compose exec to run commands inside the daemon
+## Check status of WWG
+docker compose exec wallet-watchguard wwg status
+## Check balance of your wallets
+docker compose exec wallet-watchguard wwg balance
+## Show next unused address from one of your wallets with QR code
+docker compose exec wallet-watchguard wwg next
+## Create QR code to request sats with optional message
+docker compose ecec wallet-watchguard wwg request
+## Add, remove, or rename a wallet
+docker compose exec wallet-watchguard wwg wallet add
+docker compose exec wallet-watchguard wwg wallet remove
+docker compose exec wallet-watchguard wwg wallet rename
+```
+
+If the config already exists, `wwg init` asks whether to update part of the config, reset it, or exit.
+
+You can get plain output from commands such as `wwg next` and `wwg request` for use in scripts, allowing you to use WWG as a tool for automating your own Bitcoin workflow or projects.
+
+For example:
+
+```bash
+addr="$(docker compose exec wallet-watchguard wwg request --wallet-index=1 --sats 50000 --note "Coffee" --plain)"
+```
+
+Stores the following within the `$addr` variable:
+
+```bash
+bitcoin:bc1p7lwvtp2mlv4l6wkmkcjh9rjxhma8ttwpz7pyf93f4srtcdehm3ustwkef0?amount=0.0005&message=Coffee
+```
+
+You can feed this variable into your own script or application to automate requests, create your own QR codes, write NFC tags, whatever you want.
+
+Whereas if you run the same command without the `--plain` flag in the interactive terminal, you get both the metadata and the human friendly output with a QR code:
+
+```bash
+Wallet: Cake Wallet Nostr (bitcoin / taproot)
+Receive address:
+  m/86'/0'/0'/0/2    bc1p7lwvtp2mlv4l6wkmkcjh9rjxhma8ttwpz7pyf93f4srtcdehm3ustwkef0
+Amount: 0.0005 BTC
+Note: Coffee
+
+Payment request:
+
+  bitcoin:bc1p7lwvtp2mlv4l6wkmkcjh9rjxhma8ttwpz7pyf93f4srtcdehm3ustwkef0?amount=0.0005&message=Coffee
+
+QR code:
+
+█████████████████████████████████████████████
+██ ▄▄▄▄▄ ██ █▀▀█▀▀▀█▀▄█ ▀▄█▀█▀ ▀▀▄ █ ▄▄▄▄▄ ██
+██ █   █ █ ▄▄▀ █▀███▀█  ▄█▄▀ █▀▀█▄▀█ █   █ ██
+██ █▄▄▄█ █ █▀▀███ ▀▄█▄▀▄█▄ ▄▀▀▄▀ ▄▄█ █▄▄▄█ ██
+██▄▄▄▄▄▄▄█ ▀ █ █▄▀ █ █▄▀▄▀ █▄▀▄█ ▀▄█▄▄▄▄▄▄▄██
+██▄▀  ▄ ▄█▀█▀ ▀ ▀██▄▄ ▀▀▄ ▀▄ █▀ ▀ ▀▀   ▄▄█▀██
+████ ▀██▄▀█ ▄▄ ▄▀█ ▄▄█▀▀ █ █▄▄ █ ▀█▀▀▀ ▀▄ ███
+██  ▄ █▀▄▄██▀▄  █   ▀█▀█ ▀▄▄  ▀▄▀  ▀▀▀▀▀ ▄▀██
+██▄ ▄▀ ▀▄▄▄▄▀▀█▄█▀▀██ ▀  ███   ██▀▄█ ██ ██▀██
+██▄█▀▀ █▄██▀▀ ▀ ▄█▀ ▄  ▀▄▀▄ ▄█▀▄█▀▄▀▀▀▀█▄ ▀██
+██ ▀ ▄▀▄▄▀█ ▄██▄█▄  ▀▀▀ █▀█▄ ▄ █▄█  ▄▄▀▀▄█▀██
+██▀▀ ▀▀▀▄▄▀▄  ▀ ▄█▄█▀ ▄▄█ █▄▄▄▄▄▀ ▀▄▀█▀▄▄  ██
+██▀█ █  ▄█  █▄▀▀▀█ ▄▀▀▀  █ ▄  ▄▄▄▀███  ███▀██
+██▀▀█▄▀ ▄ █ ▄ █▄▄▀▀▄█▀▄▀▄▀█▄ ▄▄ ▄▀▄▀▀▀▀▄ ▄▀██
+██▄▄ ▄ ▀▄▀▄▀▄▄▀ ██▀▄▀▀▀ ██▄█▄ ██ ▀▀█▄▄▀ █ ▀██
+██  ▀▄█ ▄ █  ▄██▄▄▄▄▄█▄█ ▀▄▄ ▄▄▄▀  ▀▀▀▀▄ █ ██
+██ █▀█▀█▄█▄█▄ ▀██ ▀█ █▄▀ ▀▄▄▄  ▄▄█ ▄▄▄▀ ▄▀███
+██▄█▄███▄▄▀ ▀ █ ███▄ ▀▀█ ▀▀▄▀▄ ▄██ ▄▄▄ ▀▄▀▀██
+██ ▄▄▄▄▄ █▀▄█▄████▀█▄█ █▄█ ▄▄ ▀▄█  █▄█ ▀██▀██
+██ █   █ █ ▄▀█▀▀▄ ▀█▄▀▀▄▄▀█▄▄▄▀▄▀█▄▄▄▄▄█▄▀▀██
+██ █▄▄▄█ █▄▄▀█  ▄▀  ██▄ ▄▀█▄▄  █▄▀   ▄ ██▀███
+██▄▄▄▄▄▄▄█▄▄▄▄██▄█▄▄█▄▄█▄██▄▄█▄▄█▄███▄▄▄▄████
+▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+```
+
+These QR codes are extremely clear and readable even within a terminal:
+
+<img width="1167" height="800" alt="image" src="https://github.com/user-attachments/assets/1a94f40c-f3a3-4882-8a10-b96f9d948774" />
+
+When scanned, you will get something like this on your mobile Bitcoin wallet (UX varies by wallet, of course):
+
+<img width="1290" height="1436" alt="image" src="https://github.com/user-attachments/assets/c0a676e8-ac0d-4582-9d6f-ecb2d70c315b" />
+
+QR codes are also generated when you run `wwg next` to get a new unused Bitcoin address. These do not include amounts or messages, just the address. If you don't want the QR codes when running `wwg next`, you can simply add the `--no-qr` flag, or use `--plain` to get only the address and nothing else, useful for variables and scripting.
+
+For example if you want a list of 10 unused addresses for your first wallet without QR codes or any other metadata printed at all, just a simple list of line separated addresses, you can run:
+
+```bash
+docker compose exec wallet-watchguard wwg next 10 --wallet-index=1 --plain
+```
+
+If you want a list of three new addresses from your second wallet with both the derivation path and the addresses but no QR codes, use `--no-qr` instead:
+
+```bash
+docker compose exec wallet-watchguard wwg next 3 --wallet-index=2 --no-qr
+```
+
+As you can see, this tool is designed to be extremely flexible and usable both within the interactive terminal and within your own scripts and automations.
 
 ## Transaction Notifications
 
@@ -535,6 +619,7 @@ Below are the Python dependencies and what they're used for:
 - **aiosqlite**: Provides async SQLite access for WWG’s local database, including wallet events, transaction history, and stats.
 - **PyNaCl**: Handles cryptographic operations for secure passphrase based encryption and password hashing. This is used to encrypt xpubs at rest.
 - **python-socks[asyncio]**: Adds async SOCKS proxy support, used for routing Electrum or HTTP connections through Tor, especially when connecting to `.onion` services.
+- **segno**: Generates QR codes for latest Bitcoin addresses and payment requests.
 
 And for the Rus helper:
 
