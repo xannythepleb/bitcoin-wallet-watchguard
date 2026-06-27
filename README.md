@@ -6,7 +6,7 @@ Bitcoin Wallet Watchguard allows you to get notified of any transaction to or fr
 
 All of this is made possible by [ntfy](https://github.com/binwiederhier/ntfy), an open source self-hostable project supported by both Umbrel and Start9. Therefore, Wallet Watchguard does all of this while maintaining sovereignty and privacy so long as you configure it to use your own node and host ntfy yourself.
 
-Your xpub is only ever stored locally on the machine you install Wallet Watchguard on. It is encrypted at rest using XSalsa20-Poly1305 and Argon2id, provided by the battle tested libsodium library.
+Your xpub is only ever stored locally on the machine you install Wallet Watchguard on. It is encrypted at rest using XSalsa20-Poly1305 and protected by a passphrase hashed with Argon2id, both provided by the battle tested libsodium cryptography library.
 
 ## Roadmap
 
@@ -47,7 +47,7 @@ To launch in the future:
 WWG_PASSPHRASE='your passphrase here' docker compose up -d
 ```
 
-You can choose to store your `WWG_PASSPHRASE` in your `.env` for convenience, with obvious security tradeoffs.
+You can choose to store your `WWG_PASSPHRASE` in your `.env` for convenience, especially seamless restarts, with obvious security tradeoffs.
 
 To run commands, e.g. `status`:
 
@@ -58,13 +58,13 @@ docker compose exec wallet-watchguard wwg status
 Note the distinction between how we run the Docker Compose container during `init` and after setup is complete:
 
 ```bash
-# First time setup
+# First time setup - docker compose run --rm to create a temporary container that launches the onboarding wizard to create your config
 docker compose run --rm wallet-watchguard wwg init
 
 # Start the daemon
 docker compose up -d
 
-# Example usage commands
+# Example usage commands - docker compose exec to run commands inside the daemon
 ## Check status of WWG
 docker compose exec wallet-watchguard wwg status
 ## Check balance of your wallets
@@ -109,6 +109,57 @@ docker run ghcr.io/xannythepleb/bitcoin-wallet-watchguard:latest wwg init
 
 We recommend using Docker Compose as described above. It is the simplest way to install WWG: simply download `docker-compose.yml` into the `bitcoin-wallet-watchguard` directory (or whatever you want to name it) then run `docker compose pull` to automatically grab the latest stable image.
 
+## Transaction Notifications
+
+Whenever a transaction occurs, you will be notified via Ntfy.
+
+If you have Mempool integration configured correctly, you will get extra details about the transaction like so:
+
+```
+**Wallet:** Jade Cold Wallet
+
+**Type:** received
+
+**Status:** unconfirmed/mempool
+
+**Amount:** +69,420 sats
+
+**vsize:** 420 vB
+
+**Fee rate:** 2.67 sat/vB
+
+**Inputs:**
+
+* bc1q67xanz...
+* bc1p420asd...
+
+**Outputs:**
+
+* ✅ bc1p999tap... - 69,418 sats
+
+**Wallet path:** m/86'/0'/0'/0/4
+
+**Tx:** abc123...
+```
+
+Without Mempool, you will get a simpler notification:
+
+```
+**Wallet:** Jade Cold Wallet
+
+**Type:** activity
+
+**Status:** confirmed at height 9999999
+
+**Address:** bc1p999tap...
+
+**Wallet path:** m/86'/0'/0'/0/4
+
+**Tx:** abc123...
+```
+
+As you can see, Mempool allows WWG to pick up the amount, whether it was sent or received, details of the input and output, and fee paid. Instructions on how to configure Mempool integration are further down.
+
 ## Conversation Mode: Talk to Your Wallet Anywhere
 
 Conversation Mode lets you query Wallet Watchguard remotely through ntfy. You can keep an eye on even your hardware cold storage wherever you are via 100% self-hosted infrastructure. No third party middleman if you configure it correctly with your own node and your own ntfy instance. You can run both of these on your own physical hardware using Start9 or Umbrel for true sovereignty.
@@ -120,14 +171,7 @@ It is off by default and checks are in place to ensure it is only enabled on sec
 Enable it in config:
 
 ```bash
-wwg init --add conversation
-```
-
-Or enable it for a single daemon run:
-
-```bash
-WWG_PASSPHRASE='your passphrase here' docker compose run --rm wallet-watchguard \
-  wwg run --conversation
+docker compose exec wallet-watchguard wwg init --add conversation
 ```
 
 Conversation Mode will only start if the configured ntfy topic passes runtime protection checks:
@@ -216,7 +260,7 @@ This means Wallet Watchguard has a write-only credential. Normal notifications w
 If you use Start9/StartOS ntfy, run:
 
 ```bash
-wwg init --add ntfy
+docker compose exec wallet-watchguard wwg init --add ntfy
 ```
 
 Choose the Start9/StartOS provision publisher path.
@@ -253,9 +297,9 @@ StartOS, Umbrel, and other local node systems often use private or self-signed T
 Run the relevant setup section and disable TLS certificate verification for that local service:
 
 ```bash
-wwg init --add electrum
-wwg init --add ntfy
-wwg init --add mempool
+docker compose exec wallet-watchguard wwg init --add electrum
+docker compose exec wallet-watchguard wwg init --add ntfy
+docker compose exec wallet-watchguard wwg init --add mempool
 ```
 
 TLS encryption still remains enabled; only public CA/hostname verification is skipped for that local self-hosted service.
@@ -266,36 +310,29 @@ For existing configs without `electrum.tls_verify`, Wallet Watchguard automatica
 
 Wallet Watchguard supports `.onion` Electrum/Fulcrum hosts through both external SOCKS5 proxies and, for Docker and Docker Compose deployments, you can now enable an internal Tor proxy so the container directly supports upstream Tor only Bitcoin nodes without any manual networking config required.
 
-This is off by default. Enable/disable it from the CLI:
+This is off by default. Enable/disable it persistently from the CLI:
 
 ```bash
-wwg tor enable
-wwg tor disable
-wwg tor status
+docker compose exec wallet-watchguard wwg tor enable
+docker compose exec wallet-watchguard wwg tor disable
+docker compose exec wallet-watchguard wwg tor status
 ```
 
-You can also enable it for a single session when launching WWG:
+You can also enable it for just a single session with an environment variable:
+
+```bash
+WWG_TOR_UPSTREAM=true docker compose up -d
+```
+
+Or if you don't use Docker Compose:
 
 ```bash
 wwg run --tor-upstream
-wwg addresses --tor-upstream --limit 20
-```
-
-With Docker Compose, you can also enable it through an environment variable:
-
-```bash
-WWG_TOR_UPSTREAM=true WWG_PASSPHRASE='your passphrase here' docker compose up -d
 ```
 
 When the switch is on, Wallet Watchguard automatically sets the effective Electrum SOCKS proxy to `tor.socks_proxy`. The startup summary and `wwg status` output include a multi-line `Tor Upstream` section showing whether it is enabled, which proxy is used, and whether Wallet Watchguard manages the Tor process. The Electrum/Fulcrum section shows the effective SOCKS proxy and, after a connectivity probe, the Electrum/Fulcrum server version.
 
 Test Tor connectivity manually with:
-
-```bash
-wwg test-tor
-```
-
-With Docker Compose:
 
 ```bash
 WWG_TOR_UPSTREAM=true docker compose run --rm wallet-watchguard wwg test-tor
@@ -320,79 +357,33 @@ If it times out, just try again. Tor can be fickle sometimes, that is the nature
 
 ## Ntfy & Electrum Test Commands
 
-After configuring ntfy, send a test notification:
+After configuring ntfy, restart the daemon and send a test notification:
 
 ```bash
-wwg test-ntfy
-```
-
-With Docker Compose:
-
-```bash
-WWG_PASSPHRASE='your passphrase here' docker compose run --rm wallet-watchguard wwg test-ntfy
+docker compose restart wallet-watchguard
+docker compose exec wallet-watchguard wwg test-ntfy
 ```
 
 Once you have both Ntfy and Electrum up and running, you can test with a real transaction notification:
 
 ```bash
-wwg test-ntfy --latest-tx
+docker compose exec wallet-watchguard wwg test-ntfy --latest-tx
 ```
 
 This will ask which wallet you want to test with, or you can select one directly by index or name:
 
 ```bash
-wwg test-ntfy --latest-tx --wallet-index 1
-wwg test-ntfy --latest-tx --wallet "Jade Cold Wallet"
+docker compose exec wallet-watchguard wwg test-ntfy --latest-tx --wallet-index 1
+docker compose exec wallet-watchguard wwg test-ntfy --latest-tx --wallet "Jade Cold Wallet"
 ```
 
-If you have Mempool integration configured correctly, you will get extra details about the transaction like so:
+If the `test-ntfy` command works but the notifications themselves don't, you can use `live-debug` to help diagnose this. With your daemon running:
 
-```
-**Wallet:** Jade Cold Wallet
-
-**Type:** received
-
-**Status:** unconfirmed/mempool
-
-**Amount:** `+69,420 sats`
-
-**vsize:** `420 vB`
-
-**Fee rate:** `2.67 sat/vB`
-
-**Inputs:**
-
-* `bc1q67xanz...`
-* `bc1p420asd...`
-
-**Outputs:**
-
-* ✅ `bc1p999tap...` - `69,418 sats`
-
-**Wallet path:** `m/86'/0'/0'/0/4`
-
-**Tx:** `abc123...`
+```bash
+docker compose exec wallet-watchguard wwg live-debug
 ```
 
-Without Mempool, you will get a simpler notification:
-
-```
-**Wallet:** Jade Cold Wallet
-
-**Type:** activity
-
-**Status:** confirmed at height 9999999
-
-**Address:** `bc1p999tap...`
-
-**Wallet path:** `m/86'/0'/0'/0/4`
-
-**Tx:** `abc123...`
-```
-
-As you can see, Mempool allows WWG to pick up the amount, whether it was sent or received, details of the input and output, and fee paid.
-
-Which brings us nicely onto...
+This will test the full end-to-end process exactly as if WWG had just picked up a new transaction and print debug info on the terminal as it does it. This should help you troubleshoot issues in your config or pick up bugs in WWG. If it looks like the latter, please open an issue.
 
 ## Optional Mempool API Integration
 
@@ -411,7 +402,7 @@ received/sent/self-transfer classification
 Enable it with:
 
 ```bash
-wwg init --add mempool
+docker compose run --rm wallet-watchguard wwg init --add mempool
 ```
 
 Use a local/self-hosted Mempool API where possible, for example:
@@ -428,54 +419,28 @@ mempool:
 Test it with:
 
 ```bash
-wwg fees
+docker compose exec wallet-watchguard wwg fees
 ```
 
 ## Address and Balance Listing
 
-List receive addresses and balances. If more than one wallet is configured, Wallet Watchguard now asks which wallet you want to view:
+List receive addresses and balances. If more than one wallet is configured, Wallet Watchguard asks which wallet you want to view:
 
 ```bash
-wwg addresses --limit 20
+docker compose exec wallet-watchguard wwg addresses --limit 20
 ```
 
-Show every configured wallet without prompting:
+Show the next unused wallet address:
 
 ```bash
-wwg addresses --all --limit 20
+docker compose exec wallet-watchguard wwg next
 ```
 
-Limit to one wallet by exact name or unique partial name:
+Show the total balance across all wallets:
 
 ```bash
-wwg addresses --wallet "Main Taproot wallet"
+docker compose exec wallet-watchguard wwg balance
 ```
-
-Limit to one wallet by its 1-based index in config:
-
-```bash
-wwg addresses --wallet-index 2
-```
-
-Include change addresses:
-
-```bash
-wwg addresses --include-change --limit 20
-```
-
-Only show non-zero addresses:
-
-```bash
-wwg addresses --only-nonzero --include-change --limit 100
-```
-
-Only show addresses that already have Electrum history:
-
-```bash
-wwg addresses --only-used --include-change --limit 100
-```
-
-The address table includes a `used`/`unused` status column. Unused receive addresses are shown by default, even when their balance is zero.
 
 ## Status Command
 
@@ -483,8 +448,8 @@ The address table includes a `used`/`unused` status column. Unused receive addre
 
 Conversation Mode also understands:
 
-```text
-wwg status
+```bash
+docker compose exec wallet-watchguard wwg status
 ```
 
 That ntfy response is generated by the running daemon, so it includes live runtime values such as subscribed script count and the startup Tor probe result.
@@ -515,19 +480,15 @@ View logs:
 docker compose logs -f wallet-watchguard
 ```
 
-I made sure to use only emojis that correctly rendered in my terminal. But no one likes the "it works on my machine bro" guy do they? So if the emojis cause issues, you can view status without emojis by running:
+I made sure to use only emojis that correctly rendered in my terminal. But no one likes the "it works on my machine bro" guy so if the emojis cause issues, you can view status without emojis by running:
 
 ```bash
-wwg status --no-emoji
+docker compose exec wallet-watchguard wwg status --no-emoji
 ```
 
-Or disable them entirely by launching with:
+Or disable them entirely by launching with the `--no-emoji` flag.
 
-```bash
-wwg run --no-emoji
-```
-
-Please open an issue if you have crashes or any other weirdness with emojis enabled and tell me what distro you're using. It should not cause issues on any modern one (Ubuntu added emoji support in 18.04), but I'm documenting this just in case - if you have a niche distro and it won't run, try `--no-emoji` first.
+Please open an issue if you have crashes or any other weirdness with emojis enabled and tell me what distro you're using. It should not cause issues on any modern one (Ubuntu added emoji support in 18.04), but I'm documenting this just in case - if you have a niche or legacy distro and it won't run, try `--no-emoji` first.
 
 ## Tech Stack
 
