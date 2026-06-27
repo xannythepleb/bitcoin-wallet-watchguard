@@ -593,6 +593,24 @@ Or disable them entirely by launching with the `--no-emoji` flag.
 
 Please open an issue if you have crashes or any other weirdness with emojis enabled and tell me what distro you're using. It should not cause issues on any modern one (Ubuntu added emoji support in 18.04), but I'm documenting this just in case - if you have a niche or legacy distro and it won't run, try `--no-emoji` first.
 
+## Slim Docker Image
+
+There is a slim build of the Docker image that does not include the Tor package if you to not need it.
+
+Modify your `docker-compose.yml` to use `slim` instead of `latest`:
+
+```yml
+image: ghcr.io/xannythepleb/bitcoin-wallet-watchguard:slim
+```
+
+Then run:
+
+```bash
+docker compose pull
+```
+
+Currently the only difference between the two not including Tor. The changes will become more substantial in the future.
+
 ## Tech Stack
 
 Bitcoin Wallet Watchguard uses:
@@ -621,7 +639,7 @@ Below are the Python dependencies and what they're used for:
 - **python-socks[asyncio]**: Adds async SOCKS proxy support, used for routing Electrum or HTTP connections through Tor, especially when connecting to `.onion` services.
 - **segno**: Generates QR codes for latest Bitcoin addresses and payment requests.
 
-And for the Rus helper:
+And for the Rust helper:
 
 * **anyhow**: Used for simple fallible CLI flow: `Result<()>`, custom validation errors via `anyhow!`, and extra context on parsing/derivation failures via `.context(...)`
 * **bitcoin**: The core wallet derivation library. Used to parse the supplied `xpub`, derive public keys, and generate the four main Bitcoin address types:
