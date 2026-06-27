@@ -67,6 +67,23 @@ def _parse_address_count(raw: str | None) -> int:
         return 1
 
 
+def _should_print_terminal_qr(args: argparse.Namespace) -> bool:
+    return not bool(getattr(args, "no_qr", False)) and sys.stdout.isatty()
+
+
+def _print_terminal_qr(value: str) -> None:
+    try:
+        import segno
+    except ImportError as exc:
+        raise RuntimeError(
+            "QR output requires the 'segno' package. "
+            "Install/update dependencies or rerun with --no-qr."
+        ) from exc
+
+    qr = segno.make(value, error="m")
+    qr.terminal(compact=True, border=2)
+
+
 def _prompt_secret(label: str) -> str:
     return getpass.getpass(f"{label}: ").strip()
 
@@ -1637,8 +1654,14 @@ async def _cmd_next_async(config: dict, passphrase: str, args: argparse.Namespac
 
             label = "address" if len(found) == 1 else "addresses"
             print(f"Next unused receive {label}:")
+            show_qr = _should_print_terminal_qr(args)
             for item in found:
                 print(f"  {item.path:<18} {item.address}")
+                if show_qr:
+                    print()
+                    qr_label = "QR code:" if len(found) == 1 else f"QR code for {item.path}:"
+                    print(qr_label)
+                    _print_terminal_qr(item.address)
     finally:
         listener_task.cancel()
         try:
@@ -2264,6 +2287,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_next.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt/env")
     p_next.add_argument("--wallet", default=None, help="Only use one wallet by exact name or unique partial name")
     p_next.add_argument("--wallet-index", type=int, default=None, help="Only use one wallet by its 1-based index in config")
+    p_next.add_argument("--no-qr", action="store_true", help="Do not print a terminal QR code for the address")
     _add_tor_upstream_arg(p_next)
     p_next.set_defaults(func=cmd_next)
 

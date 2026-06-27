@@ -37,7 +37,7 @@ Alternatively, if you prefer `wget`:
 wget -O docker-compose.yml https://raw.githubusercontent.com/xannythepleb/bitcoin-wallet-watchguard/refs/heads/main/docker-compose.yml
 ```
 
-#### One liner
+### One liner
 
 Paste this in your terminal to get up and running:
 
