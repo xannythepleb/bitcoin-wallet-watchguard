@@ -16,20 +16,16 @@ The existing view only wallet features via command line syntax are useful but I'
 
 ## First Time Setup
 
-### Local
-
-```bash
-git clone https://github.com/xannythepleb/bitcoin-wallet-watchguard.git
-cd bitcoin-wallet-watchguard
-wwg init
-wwg run
-```
-
 ### Docker Compose
 
+Docker Compose is the recommended and officially supported installation method:
+
 ```bash
-mkdir bitcoin-wallet-watchguard && cd bitcoin-wallet-watchguard
-curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/xannythepleb/bitcoin-wallet-watchguard/refs/heads/main/docker-compose.yml
+mkdir -p bitcoin-wallet-watchguard && cd bitcoin-wallet-watchguard
+
+curl -fsSL -o docker-compose.yml \
+  https://raw.githubusercontent.com/xannythepleb/bitcoin-wallet-watchguard/main/docker-compose.yml
+
 docker compose pull
 docker compose run --rm wallet-watchguard wwg init
 docker compose up -d
@@ -39,6 +35,14 @@ Alternatively, if you prefer `wget`:
 
 ```bash
 wget -O docker-compose.yml https://raw.githubusercontent.com/xannythepleb/bitcoin-wallet-watchguard/refs/heads/main/docker-compose.yml
+```
+
+#### One liner
+
+Paste this in your terminal to get up and running:
+
+```bash
+mkdir -p bitcoin-wallet-watchguard && cd bitcoin-wallet-watchguard && curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/xannythepleb/bitcoin-wallet-watchguard/main/docker-compose.yml && docker compose pull && docker compose run --rm wallet-watchguard wwg init && docker compose up -d
 ```
 
 To launch in the future:
@@ -108,6 +112,21 @@ docker run ghcr.io/xannythepleb/bitcoin-wallet-watchguard:latest wwg init
 ```
 
 We recommend using Docker Compose as described above. It is the simplest way to install WWG: simply download `docker-compose.yml` into the `bitcoin-wallet-watchguard` directory (or whatever you want to name it) then run `docker compose pull` to automatically grab the latest stable image.
+
+### Local
+
+```bash
+git clone https://github.com/xannythepleb/bitcoin-wallet-watchguard.git
+cd bitcoin-wallet-watchguard
+wwg init
+wwg run
+```
+
+We only recommend using a local install unless you really really don't like Docker or you want to help with development and debugging in your local environment. With how Python manages dependencies, Docker is much cleaner, and the containerised environment provides you with extra security - for example, WWG in Docker only has access to its own database and config. It has zero access to other files and applications on your OS. It can't see your hot wallet private keys, your emails, your photos, your browser history, nothing.
+
+It is also much easier to uninstall a Docker container fully if you decide you want to (although we hope you don't) as all the dependencies are inside the container.
+
+**This guide and the example commands it provides will assume you are using Docker Compose as this is the recommended install method. Adjust accordingly if you aren't.**
 
 ## Transaction Notifications
 
