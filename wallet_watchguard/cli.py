@@ -5,8 +5,9 @@ import asyncio
 import getpass
 import secrets
 import sys
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import quote, urlencode, urlparse, urlunparse
 
 import yaml
 
@@ -32,6 +33,8 @@ from .healthcheck import main as healthcheck_main
 
 
 INIT_SECTIONS = ["full", "electrum", "ntfy", "wallet", "app", "mempool", "tor", "conversation"]
+SATS_PER_BTC = Decimal("100000000")
+BTC_QUANTUM = Decimal("0.00000001")
 
 def _prompt(label: str, default: str | None = None, *, display_default: str | None = None) -> str:
     # display_default lets us show a friendly hint (e.g. "not yet set") while
@@ -67,12 +70,114 @@ def _parse_address_count(raw: str | None) -> int:
         return 1
 
 
-def _should_use_plain_next_output(args: argparse.Namespace) -> bool:
+def _should_use_plain_output(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "plain", False)) or not sys.stdout.isatty()
 
 
+def _should_use_plain_next_output(args: argparse.Namespace) -> bool:
+    return _should_use_plain_output(args)
+
+
 def _should_print_terminal_qr(args: argparse.Namespace) -> bool:
-    return not _should_use_plain_next_output(args) and not bool(getattr(args, "no_qr", False))
+    return not _should_use_plain_output(args) and not bool(getattr(args, "no_qr", False))
+
+
+def _format_btc_amount(amount_btc: Decimal) -> str:
+    quantized = amount_btc.quantize(BTC_QUANTUM)
+    text = f"{quantized:.8f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _parse_btc_amount(raw: object) -> Decimal:
+    text = str(raw).strip().replace("_", "")
+    if not text:
+        raise ValueError("BTC amount must not be blank")
+
+    try:
+        amount = Decimal(text)
+    except InvalidOperation as exc:
+        raise ValueError("BTC amount must be a valid decimal number") from exc
+
+    if not amount.is_finite() or amount <= 0:
+        raise ValueError("BTC amount must be greater than zero")
+
+    try:
+        quantized = amount.quantize(BTC_QUANTUM)
+    except InvalidOperation as exc:
+        raise ValueError("BTC amount must have no more than 8 decimal places") from exc
+
+    if quantized != amount:
+        raise ValueError("BTC amount must have no more than 8 decimal places")
+
+    return quantized
+
+
+def _parse_sats_amount(raw: object) -> Decimal:
+    text = str(raw).strip().replace(",", "").replace("_", "")
+    if not text:
+        raise ValueError("Sats amount must not be blank")
+
+    try:
+        sats = int(text)
+    except ValueError as exc:
+        raise ValueError("Sats amount must be a whole number") from exc
+
+    if sats <= 0:
+        raise ValueError("Sats amount must be greater than zero")
+
+    return Decimal(sats) / SATS_PER_BTC
+
+
+def _request_amount_btc_from_args(args: argparse.Namespace) -> Decimal:
+    if getattr(args, "sats", None) is not None:
+        return _parse_sats_amount(args.sats)
+
+    if getattr(args, "btc", None) is not None:
+        return _parse_btc_amount(args.btc)
+
+    if not sys.stdin.isatty():
+        raise ValueError("Request amount is required when stdin is not interactive; pass --sats or --btc")
+
+    choice = _prompt_choice(
+        "Amount unit",
+        {
+            "1": "sats",
+            "2": "BTC",
+        },
+        default="1",
+    )
+
+    if choice == "1":
+        return _parse_sats_amount(_prompt("Amount in sats"))
+
+    return _parse_btc_amount(_prompt("Amount in BTC"))
+
+
+def _request_note_from_args(args: argparse.Namespace) -> str:
+    note = getattr(args, "note", None)
+    if note is not None:
+        return str(note).strip()
+
+    if not sys.stdin.isatty():
+        return ""
+
+    return _prompt("Note, blank for none", "").strip()
+
+
+def _bitcoin_uri(address: str, *, amount_btc: Decimal | None = None, message: str = "") -> str:
+    params: dict[str, str] = {}
+
+    if amount_btc is not None:
+        params["amount"] = _format_btc_amount(amount_btc)
+
+    message = message.strip()
+    if message:
+        params["message"] = message
+
+    if not params:
+        return f"bitcoin:{address}"
+
+    return f"bitcoin:{address}?{urlencode(params, quote_via=quote)}"
 
 
 def _print_terminal_qr(value: str) -> None:
@@ -1672,6 +1777,29 @@ async def _cmd_fees_async(config: dict) -> None:
     print(format_mempool_fee_summary(fees))
 
 
+async def _find_unused_receive_addresses(
+    client: ElectrumClient,
+    config: dict,
+    wallet: dict,
+    passphrase: str,
+    *,
+    count: int,
+):
+    default_lookahead = int(config["app"].get("lookahead", 100))
+    scan_limit = max(int(wallet.get("lookahead", default_lookahead)), count)
+    derived = _derive_for_cli(config, wallet, passphrase, branch=0, limit=scan_limit)
+
+    found = []
+    for item in derived:
+        history = await client.call("blockchain.scripthash.get_history", [item.scripthash])
+        if not history:
+            found.append(item)
+            if len(found) >= count:
+                break
+
+    return found, scan_limit
+
+
 async def _cmd_next_async(config: dict, passphrase: str, args: argparse.Namespace, *, count: int) -> None:
     client = _make_electrum_client(config)
 
@@ -1685,19 +1813,15 @@ async def _cmd_next_async(config: dict, passphrase: str, args: argparse.Namespac
 
     try:
         wallets = _select_wallets_for_addresses(config, args)
-        default_lookahead = int(config["app"].get("lookahead", 100))
 
         for wallet in wallets:
-            scan_limit = max(int(wallet.get("lookahead", default_lookahead)), count)
-            derived = _derive_for_cli(config, wallet, passphrase, branch=0, limit=scan_limit)
-
-            found = []
-            for item in derived:
-                history = await client.call("blockchain.scripthash.get_history", [item.scripthash])
-                if not history:
-                    found.append(item)
-                    if len(found) >= count:
-                        break
+            found, scan_limit = await _find_unused_receive_addresses(
+                client,
+                config,
+                wallet,
+                passphrase,
+                count=count,
+            )
 
             if _should_use_plain_next_output(args):
                 if not found:
@@ -1728,7 +1852,76 @@ async def _cmd_next_async(config: dict, passphrase: str, args: argparse.Namespac
                     print()
                     qr_label = "QR code:" if len(found) == 1 else f"QR code for {item.path}:"
                     print(qr_label)
-                    _print_terminal_qr(item.address)
+                    _print_terminal_qr(_bitcoin_uri(item.address))
+    finally:
+        listener_task.cancel()
+        try:
+            await listener_task
+        except asyncio.CancelledError:
+            pass
+        await client.close()
+
+
+async def _cmd_request_async(config: dict, passphrase: str, args: argparse.Namespace) -> None:
+    wallet = _select_one_wallet(config, args)
+    amount_btc = _request_amount_btc_from_args(args)
+    note = _request_note_from_args(args)
+    client = _make_electrum_client(config)
+
+    async def ignore_notifications(message: dict) -> None:
+        _ = message
+
+    await client.connect()
+    listener_task = asyncio.create_task(client.listen(ignore_notifications))
+
+    try:
+        found, scan_limit = await _find_unused_receive_addresses(
+            client,
+            config,
+            wallet,
+            passphrase,
+            count=1,
+        )
+
+        if not found:
+            if _should_use_plain_output(args):
+                print(
+                    f"No unused receive address found within lookahead {scan_limit} for wallet: {wallet['name']}",
+                    file=sys.stderr,
+                )
+                print("Increase the wallet lookahead or check the wallet derivation path.", file=sys.stderr)
+                return
+
+            print()
+            print(f"Wallet: {wallet['name']} ({wallet['network']} / {wallet['wallet_type']})")
+            print(f"No unused receive address found within lookahead {scan_limit}.")
+            print("Increase the wallet lookahead or check the wallet derivation path.")
+            return
+
+        item = found[0]
+        request_uri = _bitcoin_uri(item.address, amount_btc=amount_btc, message=note)
+
+        if _should_use_plain_output(args):
+            print(request_uri)
+            return
+
+        print()
+        print(f"Wallet: {wallet['name']} ({wallet['network']} / {wallet['wallet_type']})")
+        print("Receive address:")
+        print(f"  {item.path:<18} {item.address}")
+        print(f"Amount: {_format_btc_amount(amount_btc)} BTC")
+        if note:
+            print(f"Note: {note}")
+        print()
+        print("Payment request:")
+        print()
+        print(f"  {request_uri}")
+
+        if _should_print_terminal_qr(args):
+            print()
+            print("QR code:")
+            print()
+            _print_terminal_qr(request_uri)
     finally:
         listener_task.cancel()
         try:
@@ -2075,6 +2268,13 @@ def cmd_next(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_request(args: argparse.Namespace) -> int:
+    config = _runtime_config(load_config(args.config), args)
+    passphrase = args.passphrase or get_passphrase_from_env_or_prompt()
+    asyncio.run(_cmd_request_async(config, passphrase, args))
+    return 0
+
+
 def cmd_balance(args: argparse.Namespace) -> int:
     config = _runtime_config(load_config(args.config), args)
     passphrase = args.passphrase or get_passphrase_from_env_or_prompt()
@@ -2363,6 +2563,29 @@ def build_parser() -> argparse.ArgumentParser:
     p_next.add_argument("--no-qr", action="store_true", help="Do not print a terminal QR code for the address")
     _add_tor_upstream_arg(p_next)
     p_next.set_defaults(func=cmd_next)
+
+    p_request = sub.add_parser(
+        "request",
+        aliases=["payment-request"],
+        help="Create a Bitcoin payment request using the next unused receive address",
+    )
+    p_request.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_request.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt/env")
+    p_request.add_argument("--wallet", default=None, help="Use one wallet by exact name or unique partial name")
+    p_request.add_argument("--wallet-index", type=int, default=None, help="Use one wallet by its 1-based index in config")
+    amount_group = p_request.add_mutually_exclusive_group()
+    amount_group.add_argument("--sats", default=None, help="Request amount in sats")
+    amount_group.add_argument("--btc", default=None, help="Request amount in BTC")
+    p_request.add_argument("--note", "--message", default=None, help="Optional payment note/message")
+    p_request.add_argument(
+        "--plain",
+        "--uri-only",
+        action="store_true",
+        help="Print only the Bitcoin payment URI; useful for NFC tags, scripts, and command substitution",
+    )
+    p_request.add_argument("--no-qr", action="store_true", help="Do not print a terminal QR code for the payment request")
+    _add_tor_upstream_arg(p_request)
+    p_request.set_defaults(func=cmd_request)
 
     p_balance = sub.add_parser(
         "balance",
