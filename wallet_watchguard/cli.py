@@ -355,7 +355,6 @@ def _prompt_app_config(existing_app: dict | None = None) -> dict[str, object]:
         "name": existing_app.get("name", "Bitcoin Wallet Watchguard"),
         "database_path": str(existing_app.get("database_path") or DEFAULT_DATABASE_PATH),
         "derivation_helper_path": str(existing_app.get("derivation_helper_path") or "./wwg-derive"),
-        "lookahead": int(_prompt("Default lookahead", str(existing_app.get("lookahead", 100)))),
         "notify_on_mempool": _prompt_bool(
             "Notify on mempool/unconfirmed transactions",
             bool(existing_app.get("notify_on_mempool", True)),
@@ -364,6 +363,7 @@ def _prompt_app_config(existing_app: dict | None = None) -> dict[str, object]:
             "Notify on confirmed transactions",
             bool(existing_app.get("notify_on_confirmed", True)),
         ),
+        "lookahead": int(_prompt("Default lookahead", str(existing_app.get("lookahead", 100)))),
     }
 
 
