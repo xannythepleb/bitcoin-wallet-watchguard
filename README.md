@@ -67,6 +67,15 @@ wwg init --reset
 
 If the config already exists, `wwg init` asks whether to update part of the config, reset it, or exit.
 
+### Update (Docker Compose)
+
+Once it's installed, simply `cd` into the directory you installed it in and run:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
 ### Docker Images
 
 Wallet Watchguard publishes Docker images to GitHub automatically. Images are built and pushed when a new version is released.
