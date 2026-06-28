@@ -21,6 +21,28 @@ DEFAULT_DATA_DIR = os.getenv("WWG_DATA_DIR", "./data")
 DEFAULT_CONFIG_PATH = f"{DEFAULT_DATA_DIR}/config.yaml"
 DEFAULT_DATABASE_PATH = f"{DEFAULT_DATA_DIR}/watchguard.sqlite3"
 
+# The notification provider section is intentionally separate from the existing
+# top level ntfy section for now. Existing configs that only have `ntfy:` keep
+# behaving as ntfy-enabled, while newer configs can opt into additional providers
+# without moving the ntfy auth/configuration fields yet.
+DEFAULT_NOTIFICATION_PROVIDERS: dict[str, Any] = {
+    "ntfy": {
+        "enabled": True,
+    },
+    "nostr": {
+        "enabled": False,
+        "helper_path": "./wwg-nostr",
+        "sender": {
+            "encrypted_nsec": "",
+            "nsec_encryption": {},
+        },
+        "recipients": [],
+        "relays": [],
+        "min_successful_relays": 1,
+        "send_copy_to_self": True,
+    },
+}
+
 
 class ConfigError(ValueError):
     pass
@@ -100,10 +122,143 @@ def _validate_boolish(config: dict[str, Any], key: str, label: str) -> None:
         raise ConfigError(f"{label}.{key} must be true or false")
 
 
+def _validate_int_at_least(config: dict[str, Any], key: str, label: str, minimum: int) -> None:
+    if key not in config:
+        return
+
+    value = config[key]
+    if isinstance(value, bool):
+        raise ConfigError(f"{label}.{key} must be an integer")
+
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"{label}.{key} must be an integer") from exc
+
+    if parsed < minimum:
+        raise ConfigError(f"{label}.{key} must be at least {minimum}")
+
+
+def notification_providers_config(config: dict[str, Any]) -> dict[str, Any]:
+    """
+    Return notification providers merged with backwards-compatible defaults.
+
+    Older configs do not have a `notifications:` section. Treat those as
+    ntfy-enabled so existing installs keep their current behaviour until the
+    setup wizard writes the newer config shape.
+    """
+    notifications = config.get("notifications") or {}
+    if isinstance(notifications, dict):
+        providers = notifications.get("providers") or {}
+    else:
+        providers = {}
+
+    merged = deepcopy(DEFAULT_NOTIFICATION_PROVIDERS)
+    if isinstance(providers, dict):
+        _deep_merge(merged, providers)
+    return merged
+
+
+def notification_provider_config(config: dict[str, Any], provider_name: str) -> dict[str, Any]:
+    return notification_providers_config(config).get(provider_name, {})
+
+
+def _validate_nostr_recipient(recipient: Any, index: int) -> None:
+    label = f"notifications.providers.nostr.recipients[{index}]"
+
+    if isinstance(recipient, str):
+        npub = recipient.strip()
+    elif isinstance(recipient, dict):
+        npub = str(recipient.get("npub") or "").strip()
+        if "name" in recipient and not isinstance(recipient["name"], str):
+            raise ConfigError(f"{label}.name must be a string")
+        if "relays" in recipient:
+            _validate_relay_list(recipient["relays"], f"{label}.relays")
+    else:
+        raise ConfigError(f"{label} must be an npub string or an object")
+
+    if not npub.startswith("npub1"):
+        raise ConfigError(f"{label} must contain a recipient npub")
+
+
+def _validate_relay_list(relays: Any, label: str) -> None:
+    if not isinstance(relays, list):
+        raise ConfigError(f"{label} must be a list")
+
+    for index, relay in enumerate(relays):
+        if not isinstance(relay, str) or not relay.strip():
+            raise ConfigError(f"{label}[{index}] must be a non-blank relay URL")
+
+        relay_url = relay.strip()
+        if not relay_url.startswith(("wss://", "ws://")):
+            raise ConfigError(f"{label}[{index}] must start with wss:// or ws://")
+
+
+def _validate_notifications(config: dict[str, Any]) -> None:
+    notifications = config.get("notifications")
+    if notifications is None:
+        return
+
+    if not isinstance(notifications, dict):
+        raise ConfigError("notifications must be an object")
+
+    providers = notifications.get("providers")
+    if providers is None:
+        return
+
+    if not isinstance(providers, dict):
+        raise ConfigError("notifications.providers must be an object")
+
+    unsupported = sorted(set(providers) - set(DEFAULT_NOTIFICATION_PROVIDERS))
+    if unsupported:
+        raise ConfigError(f"Unsupported notification provider: {', '.join(unsupported)}")
+
+    ntfy_provider = providers.get("ntfy", {})
+    if not isinstance(ntfy_provider, dict):
+        raise ConfigError("notifications.providers.ntfy must be an object")
+    _validate_boolish(ntfy_provider, "enabled", "notifications.providers.ntfy")
+
+    nostr_provider = providers.get("nostr", {})
+    if not isinstance(nostr_provider, dict):
+        raise ConfigError("notifications.providers.nostr must be an object")
+    _validate_boolish(nostr_provider, "enabled", "notifications.providers.nostr")
+    _validate_boolish(nostr_provider, "send_copy_to_self", "notifications.providers.nostr")
+    _validate_int_at_least(nostr_provider, "min_successful_relays", "notifications.providers.nostr", 1)
+
+    helper_path = nostr_provider.get("helper_path")
+    if helper_path is not None and (not isinstance(helper_path, str) or not helper_path.strip()):
+        raise ConfigError("notifications.providers.nostr.helper_path must be a non-blank string")
+
+    sender = nostr_provider.get("sender", {})
+    if not isinstance(sender, dict):
+        raise ConfigError("notifications.providers.nostr.sender must be an object")
+    if str(sender.get("encrypted_nsec") or ""):
+        if "nsec_encryption" not in sender:
+            raise ConfigError("notifications.providers.nostr.sender has encrypted_nsec but no nsec_encryption")
+        _validate_encryption_metadata(sender["nsec_encryption"], "Nostr nsec")
+
+    recipients = nostr_provider.get("recipients") or []
+    if not isinstance(recipients, list):
+        raise ConfigError("notifications.providers.nostr.recipients must be a list")
+    for index, recipient in enumerate(recipients):
+        _validate_nostr_recipient(recipient, index)
+
+    relays = nostr_provider.get("relays") or []
+    _validate_relay_list(relays, "notifications.providers.nostr.relays")
+
+    if bool(nostr_provider.get("enabled", False)):
+        if not recipients:
+            raise ConfigError("notifications.providers.nostr.enabled is true but no recipients are configured")
+        if not relays:
+            raise ConfigError("notifications.providers.nostr.enabled is true but no relays are configured")
+
+
 def validate_config(config: dict[str, Any]) -> None:
     for key in ["app", "electrum", "ntfy", "wallets"]:
         if key not in config:
             raise ConfigError(f"Missing required config section: {key}")
+
+    _validate_notifications(config)
 
     electrum = config["electrum"]
     for key in ["host", "port", "tls"]:
@@ -269,6 +424,9 @@ def default_config() -> dict[str, Any]:
                 "tags": "bitcoin,watch",
                 "tls_verify": True,
                 "timeout_seconds": 15,
+            },
+            "notifications": {
+                "providers": deepcopy(DEFAULT_NOTIFICATION_PROVIDERS),
             },
             "mempool": {
                 "enabled": False,
