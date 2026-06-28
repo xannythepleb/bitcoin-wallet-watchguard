@@ -25,7 +25,8 @@ from .derivation import derive_addresses
 from .db import Database
 from .electrum import ElectrumClient, default_tls_verify_for_host
 from .mempool import MempoolClient, format_mempool_fee_summary
-from .ntfy import NtfyNotifier, decrypt_ntfy_config
+from .notifications import build_notification_manager, format_test_notification
+from .ntfy import decrypt_ntfy_config
 from .status import build_status_text, format_server_version, tor_upstream_lines
 from .tor import TorUpstreamManager, apply_tor_upstream, env_tor_upstream_enabled
 from .watcher import Watcher, get_passphrase_from_env_or_prompt
@@ -1135,18 +1136,8 @@ def _print_tor_next_steps(config_path: Path, *, enabled: bool) -> None:
 
 
 async def _cmd_test_ntfy_async(config: dict, passphrase: str) -> None:
-    notifier = NtfyNotifier(decrypt_ntfy_config(config["ntfy"], passphrase))
-    message = (
-        "Bitcoin Wallet Watchguard successfully published this test notification via ntfy.\n\n"
-        "This is free and open source software made by a fellow bitcoiner.\n"
-        "If you appreciate it, my Lightning address is xanny@cake.cash ⚡"
-    )
-    await notifier.send(
-        "⚡ Wallet Watchguard: Test Alert",
-        message,
-        priority="default",
-        tags="white_check_mark,bitcoin",
-    )
+    notifications, _ = build_notification_manager(config, passphrase)
+    await notifications.send(format_test_notification())
 
 
 async def _cmd_test_tor_async(config: dict) -> str:
