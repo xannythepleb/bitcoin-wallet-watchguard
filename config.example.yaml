@@ -68,7 +68,7 @@ notifications:
 
     nostr:
       enabled: false
-      helper_path: "/usr/local/bin/wwg-nostr"
+      helper_path: "./wwg-nostr"
       sender:
         # The setup wizard will write an encrypted nsec here.
         encrypted_nsec: ""

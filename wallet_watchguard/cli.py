@@ -11,7 +11,16 @@ from urllib.parse import quote, urlencode, urlparse, urlunparse
 
 import yaml
 
-from .config import DEFAULT_CONFIG_PATH, DEFAULT_DATABASE_PATH, PLACEHOLDER_NTFY_TOPIC, default_config, load_config, load_config_for_edit, save_config
+from .config import (
+    DEFAULT_CONFIG_PATH,
+    DEFAULT_DATABASE_PATH,
+    PLACEHOLDER_NTFY_TOPIC,
+    default_config,
+    load_config,
+    load_config_for_edit,
+    notification_provider_config,
+    save_config,
+)
 from .crypto import (
     decrypt_xpub_with_passphrase,
     encrypt_string_with_passphrase,
@@ -27,6 +36,7 @@ from .electrum import ElectrumClient, default_tls_verify_for_host
 from .mempool import MempoolClient, format_mempool_fee_summary
 from .notifications import build_notification_manager, format_test_notification
 from .ntfy import decrypt_ntfy_config
+from .nostr import nostr_helper_availability_from_config, nostr_support_unavailable_message
 from .status import build_status_text, format_server_version, tor_upstream_lines
 from .tor import TorUpstreamManager, apply_tor_upstream, env_tor_upstream_enabled
 from .watcher import Watcher, get_passphrase_from_env_or_prompt
@@ -1022,6 +1032,7 @@ def _print_save_summary(config_path: Path, config: dict) -> None:
     print("Useful checks:")
     print(f"  wwg status")
     print(f"  wwg test-ntfy")
+    print(f"  wwg nostr status")
     print(f"  wwg test-tor")
     print(f"  wwg addresses --limit 20")
 
@@ -2323,6 +2334,39 @@ def cmd_tor_disable(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_nostr_status(args: argparse.Namespace) -> int:
+    config_path = Path(args.config)
+
+    if not config_path.exists():
+        _print_missing_config_help(config_path)
+        return 2
+
+    if config_path.is_dir():
+        print(file=sys.stderr)
+        print(f"Config path is a directory, not a file: {config_path}", file=sys.stderr)
+        print(file=sys.stderr)
+        return 2
+
+    config = load_config_for_edit(config_path)
+    nostr_config = notification_provider_config(config, "nostr")
+    enabled = bool(nostr_config.get("enabled", False))
+    availability = nostr_helper_availability_from_config(config)
+
+    print("Nostr notifications:", "enabled" if enabled else "disabled")
+    print(f"Configured helper: {availability.configured_path}")
+    print(f"Helper: {availability.status_text}")
+
+    if availability.available:
+        print()
+        print("The Nostr helper is available for this build.")
+        print("Encrypted DM delivery will be wired in when the Rust Nostr helper integration lands.")
+        return 0
+
+    print()
+    print(nostr_support_unavailable_message(availability))
+    return 2 if enabled else 0
+
+
 def cmd_tor_status(args: argparse.Namespace) -> int:
     config_path = Path(args.config)
     config = _load_config_for_persistent_tor_edit(config_path)
@@ -2596,6 +2640,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_test_tor.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     _add_tor_upstream_arg(p_test_tor)
     p_test_tor.set_defaults(func=cmd_test_tor)
+
+    p_nostr = sub.add_parser("nostr", help="Inspect Nostr notification helper availability")
+    nostr_sub = p_nostr.add_subparsers(dest="nostr_command", required=True)
+
+    p_nostr_status = nostr_sub.add_parser(
+        "status",
+        aliases=["check"],
+        help="Show whether the wwg-nostr helper is available in this build",
+    )
+    p_nostr_status.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_nostr_status.set_defaults(func=cmd_nostr_status)
 
     p_tor = sub.add_parser("tor", help="Manage persistent internal Tor upstream settings")
     tor_sub = p_tor.add_subparsers(dest="tor_command", required=True)

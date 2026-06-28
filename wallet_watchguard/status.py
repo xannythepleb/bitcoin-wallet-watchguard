@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import DEFAULT_CONFIG_PATH, DEFAULT_DATABASE_PATH, notification_providers_config
+from .nostr import nostr_helper_availability
 from .tor import tor_config_from_app_config
 
 
@@ -193,12 +194,12 @@ def notification_status_lines(
 
     nostr_enabled = bool(nostr_provider.get("enabled", False))
     nostr_status = "enabled" if nostr_enabled else "disabled"
-    nostr_helper = str(nostr_provider.get("helper_path") or "./wwg-nostr")
     nostr_recipients = _count_nostr_recipients(nostr_provider.get("recipients") or [])
     nostr_relays = _count_nostr_relays(nostr_provider)
+    nostr_helper = nostr_helper_availability(nostr_provider)
     lines.append(
         f"   - Nostr: {nostr_status} recipients={nostr_recipients} "
-        f"relays={nostr_relays} helper={nostr_helper}"
+        f"relays={nostr_relays} helper={nostr_helper.status_text}"
     )
 
     return lines
@@ -322,6 +323,7 @@ def build_status_text(
                 "  wwg addresses --all --include-change --limit 20",
                 "  wwg test-ntfy",
                 "  wwg test-tor",
+                "  wwg nostr status",
                 "  wwg tor status",
                 "  wwg init --add <section>",
             ]
