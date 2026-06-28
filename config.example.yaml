@@ -70,6 +70,8 @@ notifications:
       enabled: false
       helper_path: "./wwg-nostr"
       sender:
+        # Public WWG sender identity shown by `wwg status`.
+        npub: ""
         # The setup wizard will write an encrypted nsec here.
         encrypted_nsec: ""
         nsec_encryption: {}

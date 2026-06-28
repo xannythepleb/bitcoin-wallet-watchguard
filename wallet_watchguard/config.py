@@ -33,6 +33,9 @@ DEFAULT_NOTIFICATION_PROVIDERS: dict[str, Any] = {
         "enabled": False,
         "helper_path": "./wwg-nostr",
         "sender": {
+            # Public WWG sender identity shown in status output. The matching
+            # nsec is encrypted below and never needs to be displayed.
+            "npub": "",
             "encrypted_nsec": "",
             "nsec_encryption": {},
         },
@@ -232,6 +235,11 @@ def _validate_notifications(config: dict[str, Any]) -> None:
     sender = nostr_provider.get("sender", {})
     if not isinstance(sender, dict):
         raise ConfigError("notifications.providers.nostr.sender must be an object")
+
+    sender_npub = str(sender.get("npub") or "").strip()
+    if sender_npub and not sender_npub.startswith("npub1"):
+        raise ConfigError("notifications.providers.nostr.sender.npub must be an npub")
+
     if str(sender.get("encrypted_nsec") or ""):
         if "nsec_encryption" not in sender:
             raise ConfigError("notifications.providers.nostr.sender has encrypted_nsec but no nsec_encryption")

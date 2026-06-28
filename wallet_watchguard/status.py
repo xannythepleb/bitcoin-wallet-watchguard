@@ -152,6 +152,17 @@ def _count_nostr_recipients(recipients: Any) -> int:
     return len(recipients) if isinstance(recipients, list) else 0
 
 
+
+
+def _nostr_sender_npub(nostr_config: dict[str, Any]) -> str:
+    sender = nostr_config.get("sender") or {}
+    if not isinstance(sender, dict):
+        return "not configured"
+
+    npub = str(sender.get("npub") or "").strip()
+    return npub or "not configured"
+
+
 def _count_nostr_relays(nostr_config: dict[str, Any]) -> int:
     relay_urls: set[str] = set()
 
@@ -196,10 +207,12 @@ def notification_status_lines(
     nostr_status = "enabled" if nostr_enabled else "disabled"
     nostr_recipients = _count_nostr_recipients(nostr_provider.get("recipients") or [])
     nostr_relays = _count_nostr_relays(nostr_provider)
+    nostr_sender_npub = _nostr_sender_npub(nostr_provider)
     nostr_helper = nostr_helper_availability(nostr_provider)
     lines.append(
         f"   - Nostr: {nostr_status} recipients={nostr_recipients} "
-        f"relays={nostr_relays} helper={nostr_helper.status_text}"
+        f"relays={nostr_relays} WWG npub={nostr_sender_npub} "
+        f"helper={nostr_helper.status_text}"
     )
 
     return lines

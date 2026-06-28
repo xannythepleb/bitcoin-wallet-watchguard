@@ -2350,9 +2350,12 @@ def cmd_nostr_status(args: argparse.Namespace) -> int:
     config = load_config_for_edit(config_path)
     nostr_config = notification_provider_config(config, "nostr")
     enabled = bool(nostr_config.get("enabled", False))
+    sender = nostr_config.get("sender") or {}
+    sender_npub = str(sender.get("npub") or "").strip() if isinstance(sender, dict) else ""
     availability = nostr_helper_availability_from_config(config)
 
     print("Nostr notifications:", "enabled" if enabled else "disabled")
+    print(f"WWG sender npub: {sender_npub or 'not configured'}")
     print(f"Configured helper: {availability.configured_path}")
     print(f"Helper: {availability.status_text}")
 
