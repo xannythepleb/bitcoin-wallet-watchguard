@@ -14,6 +14,8 @@ services:
       # Avoids ownership and permissions issues with Docker & SQLite
       # Also makes this shit easier to maintain
       WWG_DATA_DIR: /app/data
+      # Make sure error messages remain after the daemon crashes
+      PYTHONUNBUFFERED: "1"
     volumes:
       - wwg-data:/app/data
 
