@@ -178,8 +178,12 @@ class Watcher:
             scripts = self._derive_wallet_scripts(wallet)
             await self.db.upsert_watched_scripts(scripts)
 
+            # Baseline per wallet, not per script. A new tx lands on a fresh
+            # address whose own status/history is empty, so a per-script check
+            # mistook live activity for first-import history and stayed silent.
+            wallet_baselined = await self.db.wallet_has_baseline(wallet["name"])
+
             for script in scripts:
-                state_before = await self.db.get_scripthash_state(script.scripthash)
                 initial_status = await self.client.call("blockchain.scripthash.subscribe", [script.scripthash])
                 self._subscription_count += 1
 
@@ -187,13 +191,14 @@ class Watcher:
                 # The old watcher ignored it and only reacted to later push
                 # notifications, so transactions that happened while the daemon was
                 # offline were silently missed. Process the initial status too, but
-                # baseline first-run/imported history without spamming old alerts.
-                has_existing_baseline = bool(state_before["last_status"] is not None or state_before["history_count"])
+                # baseline a wallet's first run quietly so we don't spam old alerts.
                 await self._process_scripthash_update(
                     script.scripthash,
                     initial_status,
-                    notify_new_items=has_existing_baseline,
+                    notify_new_items=wallet_baselined,
                 )
+
+            await self.db.mark_wallet_baselined(wallet["name"])
 
     async def _test_tor_connectivity(self) -> None:
         try:

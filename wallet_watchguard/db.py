@@ -61,6 +61,11 @@ CREATE TABLE IF NOT EXISTS wallet_events (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(wallet_name, txid, event_type, status)
 );
+
+CREATE TABLE IF NOT EXISTS wallet_baseline (
+    wallet_name TEXT PRIMARY KEY,
+    baselined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -161,6 +166,44 @@ class Database:
         if row is None:
             return {"last_status": None, "history_count": 0}
         return {"last_status": row["last_status"], "history_count": int(row["history_count"] or 0)}
+
+    async def wallet_has_baseline(self, wallet_name: str) -> bool:
+        """Return True if this wallet has ever been baselined.
+
+        Baselining is now tracked per wallet rather than per script. A new tx
+        almost always lands on a fresh, previously-unused address, so a
+        per-script check wrongly treated those as first-import history and
+        silently swallowed the alert. The fallback covers existing beta
+        databases written before this table existed: any stored status or
+        history means the wallet was already baselined by the old code.
+        """
+        conn = self._conn()
+        cur = await conn.execute(
+            "SELECT 1 FROM wallet_baseline WHERE wallet_name = ? LIMIT 1",
+            (wallet_name,),
+        )
+        if await cur.fetchone() is not None:
+            return True
+        cur = await conn.execute(
+            """
+            SELECT 1
+            FROM watched_scripts ws
+            LEFT JOIN tx_history th ON th.scripthash = ws.scripthash
+            WHERE ws.wallet_name = ?
+              AND (ws.last_status IS NOT NULL OR th.txid IS NOT NULL)
+            LIMIT 1
+            """,
+            (wallet_name,),
+        )
+        return await cur.fetchone() is not None
+
+    async def mark_wallet_baselined(self, wallet_name: str) -> None:
+        conn = self._conn()
+        await conn.execute(
+            "INSERT OR IGNORE INTO wallet_baseline (wallet_name) VALUES (?)",
+            (wallet_name,),
+        )
+        await conn.commit()
 
     async def get_watched_scripts_for_wallet(self, wallet_name: str) -> list[aiosqlite.Row]:
         cur = await self._conn().execute(
