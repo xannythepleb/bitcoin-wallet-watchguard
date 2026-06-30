@@ -112,7 +112,7 @@ class Watcher:
                 autobalance_task = asyncio.create_task(self._run_autobalance_loop())
 
             self._print_startup_summary()
-            await asyncio.Event().wait()
+            await self._await_until_critical_exit(listener, autobalance_task)
         finally:
             if autobalance_task is not None:
                 autobalance_task.cancel()
@@ -133,6 +133,32 @@ class Watcher:
             await self.client.close()
             await self.db.close()
             await self.tor_upstream.stop()
+
+    async def _await_until_critical_exit(self, *tasks: asyncio.Task[Any] | None) -> None:
+        """Block until a long-lived background task exits, then surface why.
+
+        The listener and autobalance loop are meant to run for the whole life of
+        the daemon. The listener in particular raises and dies the moment the
+        Electrum server drops the connection. The old code then waited on an
+        Event forever, leaving the daemon up but no longer receiving live pushes
+        (autobalance kept working, masking the fault). Surfacing the exit here
+        unwinds to the finally block, tears the daemon down cleanly and lets the
+        process supervisor restart it; on restart the startup baseline now
+        catches up anything missed during the gap.
+        """
+        supervised = [task for task in tasks if task is not None]
+        if not supervised:
+            await asyncio.Event().wait()
+            return
+
+        done, _pending = await asyncio.wait(supervised, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            exc = task.exception()
+            if exc is not None:
+                print(f"Critical background task exited: {exc!r}", flush=True)
+                raise exc
+        # A supervised loop returned without raising; none should stop on its own.
+        raise RuntimeError("A critical background task stopped unexpectedly; restarting daemon")
 
     def _derive_wallet_scripts(self, wallet: dict[str, Any], *, lookahead: int | None = None) -> list[DerivedAddress]:
         helper_path = self.config["app"].get("derivation_helper_path", "./wwg-derive")
