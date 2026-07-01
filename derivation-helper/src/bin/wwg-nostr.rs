@@ -25,6 +25,9 @@ enum Commands {
     /// Send NIP-17 encrypted direct messages. Reads JSON from stdin.
     SendDm,
 
+    /// Publish WWG profile metadata and follow recipients. Reads JSON from stdin.
+    SetupAccount,
+
     /// Check whether the supplied relays can be reached. Reads JSON from stdin.
     TestRelays,
 }
@@ -70,6 +73,20 @@ enum RecipientInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SetupAccountRequest {
+    sender_nsec: String,
+    #[serde(default = "default_profile_name")]
+    profile_name: String,
+    recipients: Vec<RecipientInput>,
+    relays: Vec<String>,
+    #[serde(default = "default_min_successful_relays")]
+    min_successful_relays: usize,
+    #[serde(default = "default_timeout_seconds")]
+    connect_timeout_seconds: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TestRelaysRequest {
     relays: Vec<String>,
     #[serde(default = "default_timeout_seconds")]
@@ -104,6 +121,32 @@ struct RelayFailure {
 }
 
 #[derive(Serialize)]
+struct SetupAccountOutput {
+    ok: bool,
+    sender_npub: String,
+    profile_name: String,
+    followed_recipients: Vec<FollowedRecipient>,
+    metadata: PublishResult,
+    contact_list: PublishResult,
+}
+
+#[derive(Serialize)]
+struct PublishResult {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    event_id: Option<String>,
+    accepted_relays: Vec<String>,
+    failed_relays: Vec<RelayFailure>,
+}
+
+#[derive(Serialize)]
+struct FollowedRecipient {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    npub: String,
+}
+
+#[derive(Serialize)]
 struct TestRelaysOutput {
     ok: bool,
     accepted_relays: Vec<String>,
@@ -112,6 +155,10 @@ struct TestRelaysOutput {
 
 fn default_min_successful_relays() -> usize {
     1
+}
+
+fn default_profile_name() -> String {
+    "WWG Notifications".to_string()
 }
 
 fn default_timeout_seconds() -> u64 {
@@ -126,6 +173,7 @@ async fn main() -> Result<()> {
         Commands::GenerateKey => generate_key(),
         Commands::PublicKey => public_key(),
         Commands::SendDm => send_dm().await,
+        Commands::SetupAccount => setup_account().await,
         Commands::TestRelays => test_relays().await,
     }
 }
@@ -212,6 +260,74 @@ async fn send_dm() -> Result<()> {
     print_json(&output)
 }
 
+async fn setup_account() -> Result<()> {
+    let request: SetupAccountRequest = read_json_stdin("setup-account request")?;
+    validate_setup_account_request(&request)?;
+
+    let keys = Keys::parse(request.sender_nsec.trim()).context("invalid sender nsec")?;
+    let sender_npub = keys
+        .public_key()
+        .to_bech32()
+        .context("failed to encode sender npub")?;
+    let client = Client::new(keys.clone());
+    let timeout = Duration::from_secs(request.connect_timeout_seconds.max(1));
+
+    let relays = trim_and_dedupe_relays(&request.relays);
+    add_write_relays(&client, relays.iter()).await?;
+    let _connect_output = client.try_connect(timeout).await;
+
+    let profile_name = request.profile_name.trim();
+    let metadata = Metadata::new()
+        .name(profile_name)
+        .display_name(profile_name)
+        .about("Wallet Watchguard notification sender");
+
+    let metadata_result = match client.set_metadata(&metadata).await {
+        Ok(output) => {
+            let accepted_relays = relay_set_to_strings(output.success);
+            let ok = accepted_relays.len() >= request.min_successful_relays;
+            PublishResult {
+                ok,
+                event_id: Some(output.val.to_string()),
+                accepted_relays,
+                failed_relays: relay_failures_to_vec(output.failed),
+            }
+        }
+        Err(error) => publish_error_result("set_metadata", error),
+    };
+
+    let followed_recipients = followed_recipients_from_inputs(&request.recipients)?;
+    let contacts = contacts_from_followed_recipients(&followed_recipients)?;
+    let contact_list_result = match client
+        .send_event_builder(EventBuilder::contact_list(contacts))
+        .await
+    {
+        Ok(output) => {
+            let accepted_relays = relay_set_to_strings(output.success);
+            let ok = accepted_relays.len() >= request.min_successful_relays;
+            PublishResult {
+                ok,
+                event_id: Some(output.val.to_string()),
+                accepted_relays,
+                failed_relays: relay_failures_to_vec(output.failed),
+            }
+        }
+        Err(error) => publish_error_result("contact_list", error),
+    };
+
+    client.disconnect().await;
+
+    let output = SetupAccountOutput {
+        ok: metadata_result.ok && contact_list_result.ok,
+        sender_npub,
+        profile_name: profile_name.to_string(),
+        followed_recipients,
+        metadata: metadata_result,
+        contact_list: contact_list_result,
+    };
+    print_json(&output)
+}
+
 async fn test_relays() -> Result<()> {
     let request: TestRelaysRequest = read_json_stdin("test-relays request")?;
     if request.relays.is_empty() {
@@ -276,6 +392,38 @@ fn validate_send_dm_request(request: &SendDmRequest) -> Result<()> {
     Ok(())
 }
 
+fn validate_setup_account_request(request: &SetupAccountRequest) -> Result<()> {
+    if request.sender_nsec.trim().is_empty() {
+        bail!("sender_nsec is required");
+    }
+    if request.profile_name.trim().is_empty() {
+        bail!("profile_name is required");
+    }
+    if request.recipients.is_empty() {
+        bail!("at least one recipient is required");
+    }
+    if request.relays.is_empty() {
+        bail!("at least one relay is required");
+    }
+    if request.min_successful_relays == 0 {
+        bail!("min_successful_relays must be at least 1");
+    }
+    if request.min_successful_relays > request.relays.len() {
+        bail!(
+            "min_successful_relays ({}) is greater than the relay count ({})",
+            request.min_successful_relays,
+            request.relays.len(),
+        );
+    }
+
+    validate_relays(&request.relays)?;
+    for recipient in &request.recipients {
+        RecipientSpec::from_input(recipient)?;
+    }
+
+    Ok(())
+}
+
 fn validate_relays(relays: &[String]) -> Result<()> {
     for relay in relays {
         let trimmed = relay.trim();
@@ -327,7 +475,12 @@ async fn send_to_recipient(
     };
 
     match client
-        .send_private_msg_to(relays.iter().map(String::as_str), parsed_recipient, message, Vec::<Tag>::new())
+        .send_private_msg_to(
+            relays.iter().map(String::as_str),
+            parsed_recipient,
+            message,
+            Vec::<Tag>::new(),
+        )
         .await
     {
         Ok(output) => {
@@ -391,6 +544,54 @@ impl RecipientSpec {
                 })
             }
         }
+    }
+}
+
+fn followed_recipients_from_inputs(
+    recipients: &[RecipientInput],
+) -> Result<Vec<FollowedRecipient>> {
+    let mut seen = BTreeSet::new();
+    let mut followed = Vec::new();
+
+    for recipient in recipients {
+        let spec = RecipientSpec::from_input(recipient)?;
+        if seen.insert(spec.npub.clone()) {
+            followed.push(FollowedRecipient {
+                name: spec.name,
+                npub: spec.npub,
+            });
+        }
+    }
+
+    Ok(followed)
+}
+
+fn contacts_from_followed_recipients(
+    recipients: &[FollowedRecipient],
+) -> Result<Vec<Contact>> {
+    recipients
+        .iter()
+        .map(|recipient| {
+            let public_key = PublicKey::parse(recipient.npub.trim())
+                .with_context(|| format!("invalid recipient npub: {}", recipient.npub))?;
+            Ok(Contact {
+                public_key,
+                relay_url: None,
+                alias: recipient.name.clone(),
+            })
+        })
+        .collect()
+}
+
+fn publish_error_result(label: &str, error: impl ToString) -> PublishResult {
+    PublishResult {
+        ok: false,
+        event_id: None,
+        accepted_relays: Vec::new(),
+        failed_relays: vec![RelayFailure {
+            url: label.to_string(),
+            error: error.to_string(),
+        }],
     }
 }
 

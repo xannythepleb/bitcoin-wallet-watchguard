@@ -49,6 +49,7 @@ from .nostr import (
     generate_nostr_keypair,
     nostr_helper_availability_from_config,
     nostr_support_unavailable_message,
+    setup_nostr_account,
     test_nostr_relays,
 )
 from .status import build_status_text, format_server_version, tor_upstream_lines
@@ -331,23 +332,39 @@ def _recipient_name(recipient: object) -> str:
 
 
 def _prompt_nostr_recipients(existing_recipients: list[object]) -> list[object]:
-    existing_first = existing_recipients[0] if existing_recipients else {}
-    existing_npub = _recipient_npub(existing_first)
-    existing_name = _recipient_name(existing_first)
+    existing_npubs = [
+        npub
+        for npub in (_recipient_npub(recipient) for recipient in existing_recipients)
+        if npub
+    ]
+    default_npubs = ",".join(existing_npubs)
 
     while True:
-        recipient_npub = _prompt(
-            "Recipient npub for encrypted Nostr DMs",
-            existing_npub,
+        raw_recipients = _prompt(
+            "Recipient npub(s) for encrypted Nostr DMs, comma-separated",
+            default_npubs,
         ).strip()
-        if recipient_npub.startswith("npub1"):
+        recipient_npubs = [
+            value.strip() for value in raw_recipients.split(",") if value.strip()
+        ]
+        invalid_npubs = [
+            npub for npub in recipient_npubs if not npub.startswith("npub1")
+        ]
+        if recipient_npubs and not invalid_npubs:
             break
-        print("Recipient npub must start with npub1.")
+        if not recipient_npubs:
+            print("At least one recipient npub is required.")
+        else:
+            print(f"Recipient npub must start with npub1: {invalid_npubs[0]}")
 
+    if len(recipient_npubs) > 1:
+        return recipient_npubs
+
+    existing_name = _recipient_name(existing_recipients[0]) if existing_recipients else ""
     recipient_name = _prompt("Recipient name, blank for none", existing_name).strip()
     if recipient_name:
-        return [{"name": recipient_name, "npub": recipient_npub}]
-    return [recipient_npub]
+        return [{"name": recipient_name, "npub": recipient_npubs[0]}]
+    return recipient_npubs
 
 
 def _encrypt_nostr_sender_nsec(nsec: str, passphrase: str) -> tuple[str, dict[str, object]]:
@@ -378,7 +395,7 @@ async def _send_nostr_setup_test_dm_async(
     )
     result = await provider.send(
         NotificationMessage(
-            title="Bitcoin Wallet Watchguard - ⚡ xanny@cake.cash",
+            title="Wallet Watchguard Nostr test",
             markdown_body="Wallet Watchguard Nostr encrypted DM test message.",
             plain_body="Wallet Watchguard Nostr encrypted DM test message.",
         )
@@ -496,6 +513,63 @@ def _print_nostr_relay_test_result(result: dict[str, object]) -> None:
             print(f"  ✗ {_relay_failure_text(failure)}")
 
 
+def _publish_new_nostr_sender_setup(
+    *,
+    helper_path: str,
+    sender_nsec: str,
+    nostr_config: dict,
+) -> None:
+    try:
+        result = setup_nostr_account(
+            helper_path,
+            sender_nsec=sender_nsec,
+            recipients=list(nostr_config.get("recipients") or []),
+            relays=list(nostr_config.get("relays") or []),
+            profile_name="WWG Notifications",
+            min_successful_relays=int(nostr_config.get("min_successful_relays", 1)),
+            connect_timeout_seconds=int(nostr_config.get("connect_timeout_seconds", 10)),
+            timeout_seconds=int(nostr_config.get("timeout_seconds", 30)),
+        )
+    except Exception as exc:
+        print(
+            f"warning: WWG Nostr sender profile/follow setup failed: {exc}",
+            file=sys.stderr,
+        )
+        return
+
+    followed_recipients = result.get("followed_recipients") or []
+    followed_count = len(followed_recipients) if isinstance(followed_recipients, list) else 0
+    if bool(result.get("ok", False)):
+        print(
+            "Published WWG Nostr sender metadata and followed "
+            f"{followed_count} recipient npub(s)."
+        )
+        return
+
+    print(
+        "warning: WWG Nostr sender profile/follow setup completed with relay failures",
+        file=sys.stderr,
+    )
+    _print_nostr_publish_result("Metadata", result.get("metadata"))
+    _print_nostr_publish_result("Contact list", result.get("contact_list"))
+
+
+def _print_nostr_publish_result(label: str, result: object) -> None:
+    if not isinstance(result, dict):
+        return
+    accepted_relays = result.get("accepted_relays") or []
+    failed_relays = result.get("failed_relays") or []
+    accepted_count = len(accepted_relays) if isinstance(accepted_relays, list) else 0
+    failed_count = len(failed_relays) if isinstance(failed_relays, list) else 0
+    print(
+        f"  {label}: accepted_relays={accepted_count} failed_relays={failed_count}",
+        file=sys.stderr,
+    )
+    if isinstance(failed_relays, list):
+        for failure in failed_relays:
+            print(f"    ✗ {_relay_failure_text(failure)}", file=sys.stderr)
+
+
 def _configure_nostr_provider(
     config: dict,
     passphrase: str,
@@ -573,6 +647,13 @@ def _configure_nostr_provider(
     if min_successful_relays > len(nostr_provider["relays"]):
         raise ValueError(
             "Minimum successful relays cannot be greater than the configured relay count"
+        )
+
+    if should_generate:
+        _publish_new_nostr_sender_setup(
+            helper_path=helper_path,
+            sender_nsec=sender_nsec_for_test,
+            nostr_config=nostr_provider,
         )
 
     nostr_provider["send_copy_to_self"] = _prompt_bool(

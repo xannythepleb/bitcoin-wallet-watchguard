@@ -142,6 +142,34 @@ def generate_nostr_keypair(helper_path: str, *, timeout_seconds: int = 30) -> No
     return NostrKeypair(npub=npub, nsec=nsec)
 
 
+def setup_nostr_account(
+    helper_path: str,
+    *,
+    sender_nsec: str,
+    recipients: list[Any],
+    relays: list[str],
+    profile_name: str = "WWG Notifications",
+    min_successful_relays: int = 1,
+    connect_timeout_seconds: int = 10,
+    timeout_seconds: int = 30,
+) -> dict[str, Any]:
+    """Publish WWG sender profile metadata and follow configured recipients."""
+    request = {
+        "sender_nsec": sender_nsec,
+        "profile_name": profile_name,
+        "recipients": recipients,
+        "relays": relays,
+        "min_successful_relays": max(1, int(min_successful_relays)),
+        "connect_timeout_seconds": max(1, int(connect_timeout_seconds)),
+    }
+    return _run_nostr_helper_json(
+        helper_path,
+        "setup-account",
+        stdin_text=json.dumps(request, ensure_ascii=False),
+        timeout_seconds=timeout_seconds,
+    )
+
+
 def test_nostr_relays(
     helper_path: str,
     relays: list[str],
