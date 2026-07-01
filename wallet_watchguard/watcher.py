@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -713,10 +714,23 @@ class Watcher:
         interval_seconds = interval_hours * 60 * 60
 
         while True:
+            # Gate on the persisted last sent time so frequent restarts don't
+            # re-fire the summary. Previously the loop sent immediately on every
+            # start, so anything that restarted the daemon (e.g. the listener
+            # supervisor) produced a burst of Autobalance messages.
+            last_sent = await self.db.get_autobalance_last_sent()
+            if last_sent is not None:
+                remaining = interval_seconds - (time.time() - last_sent)
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+                    continue
+
             try:
                 await self._send_autobalance_notification()
+                await self.db.set_autobalance_last_sent(time.time())
             except Exception as exc:
                 print(f"Autobalance notification failed: {exc}", flush=True)
+
             await asyncio.sleep(interval_seconds)
 
 

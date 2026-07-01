@@ -66,6 +66,11 @@ CREATE TABLE IF NOT EXISTS wallet_baseline (
     wallet_name TEXT PRIMARY KEY,
     baselined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS autobalance_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    last_sent_epoch REAL
+);
 """
 
 
@@ -202,6 +207,25 @@ class Database:
         await conn.execute(
             "INSERT OR IGNORE INTO wallet_baseline (wallet_name) VALUES (?)",
             (wallet_name,),
+        )
+        await conn.commit()
+
+    async def get_autobalance_last_sent(self) -> float | None:
+        """Epoch seconds of the last successful Autobalance send, or None."""
+        cur = await self._conn().execute(
+            "SELECT last_sent_epoch FROM autobalance_state WHERE id = 1"
+        )
+        row = await cur.fetchone()
+        if row is None or row["last_sent_epoch"] is None:
+            return None
+        return float(row["last_sent_epoch"])
+
+    async def set_autobalance_last_sent(self, epoch: float) -> None:
+        conn = self._conn()
+        await conn.execute(
+            "INSERT INTO autobalance_state (id, last_sent_epoch) VALUES (1, ?) "
+            "ON CONFLICT(id) DO UPDATE SET last_sent_epoch = excluded.last_sent_epoch",
+            (epoch,),
         )
         await conn.commit()
 
