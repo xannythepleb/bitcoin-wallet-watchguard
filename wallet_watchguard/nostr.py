@@ -58,15 +58,16 @@ def nostr_helper_availability(nostr_config: dict[str, Any] | None = None) -> Nos
     configured_candidate = Path(configured_path).expanduser()
 
     if configured_candidate.exists():
-        if configured_candidate.is_file() and os.access(configured_candidate, os.X_OK):
+        resolved_candidate = configured_candidate.resolve()
+        if resolved_candidate.is_file() and os.access(resolved_candidate, os.X_OK):
             return NostrHelperAvailability(
                 configured_path=configured_path,
                 available=True,
-                resolved_path=str(configured_candidate),
+                resolved_path=str(resolved_candidate),
                 source="configured path",
             )
 
-        detail = f"configured helper exists but is not an executable file: {configured_candidate}"
+        detail = f"configured helper exists but is not an executable file: {resolved_candidate}"
         return NostrHelperAvailability(configured_path=configured_path, available=False, detail=detail)
 
     path_candidate = shutil.which(NOSTR_HELPER_BINARY)
