@@ -303,6 +303,20 @@ docker compose exec wallet-watchguard wwg disable nostr
 docker compose exec wallet-watchguard wwg disable ntfy
 ```
 
+Note: Make sure you use the full image if you want Nostr support. The full image is the default one tagged latest. The slim image only supports Ntfy. If you want to switch, simply change your `docker-compose.yml` to:
+
+```yml
+image: ghcr.io/xannythepleb/bitcoin-wallet-watchguard:latest
+```
+
+Instead of:
+
+```yml
+image: ghcr.io/xannythepleb/bitcoin-wallet-watchguard:latest
+```
+
+Again, this is the default, so you only have the slim image if you actively chose it. If you pulled from the `docker-compose.yml` without editing it, you already have the full image.
+
 ## Conversation Mode: Talk to Your Wallet Anywhere
 
 Conversation Mode lets you query Wallet Watchguard remotely through ntfy. You can keep an eye on even your hardware cold storage wherever you are via 100% self-hosted infrastructure. No third party middleman if you configure it correctly with your own node and your own ntfy instance. You can run both of these on your own physical hardware using Start9 or Umbrel for true sovereignty.
