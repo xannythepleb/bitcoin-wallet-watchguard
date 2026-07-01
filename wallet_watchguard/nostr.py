@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,6 +20,12 @@ DEFAULT_NOSTR_HELPER_PATH = f"./{NOSTR_HELPER_BINARY}"
 
 class NostrSupportUnavailable(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class NostrKeypair:
+    npub: str
+    nsec: str
 
 
 @dataclass(frozen=True)
@@ -111,6 +119,70 @@ def decrypt_nostr_sender_nsec(nostr_config: dict[str, Any], passphrase: str) -> 
         metadata=metadata_from_config(encryption_config),
         secret_name="Nostr sender nsec",
     )
+
+
+def generate_nostr_keypair(helper_path: str, *, timeout_seconds: int = 30) -> NostrKeypair:
+    """Generate a dedicated WWG Nostr keypair using the Rust helper."""
+    output = _run_nostr_helper_json(
+        helper_path,
+        "generate-key",
+        stdin_text=None,
+        timeout_seconds=timeout_seconds,
+    )
+
+    npub = str(output.get("npub") or "").strip()
+    nsec = str(output.get("nsec") or "").strip()
+
+    if not npub.startswith("npub1"):
+        raise RuntimeError("Nostr helper generate-key returned an invalid npub")
+    if not nsec.startswith("nsec1"):
+        raise RuntimeError("Nostr helper generate-key returned an invalid nsec")
+
+    return NostrKeypair(npub=npub, nsec=nsec)
+
+
+def _run_nostr_helper_json(
+    helper_path: str,
+    command: str,
+    *,
+    stdin_text: str | None,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    try:
+        completed = subprocess.run(
+            [helper_path, command],
+            input=stdin_text,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=max(1, timeout_seconds),
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"Nostr helper not found: {helper_path}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"Nostr helper {command} timed out after {max(1, timeout_seconds)}s"
+        ) from exc
+
+    stdout_text = completed.stdout.strip()
+    stderr_text = completed.stderr.strip()
+
+    if completed.returncode != 0:
+        detail = stderr_text or stdout_text or f"exit code {completed.returncode}"
+        raise RuntimeError(f"Nostr helper {command} failed: {detail}")
+
+    if not stdout_text:
+        raise RuntimeError(f"Nostr helper {command} returned no JSON output")
+
+    try:
+        parsed = json.loads(stdout_text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Nostr helper {command} returned invalid JSON") from exc
+
+    if not isinstance(parsed, dict):
+        raise RuntimeError(f"Nostr helper {command} returned unexpected JSON")
+
+    return parsed
 
 
 def ensure_nostr_helper_available(config: dict[str, Any]) -> NostrHelperAvailability:

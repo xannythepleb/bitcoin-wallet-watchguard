@@ -255,10 +255,20 @@ def _validate_notifications(config: dict[str, Any]) -> None:
     _validate_relay_list(relays, "notifications.providers.nostr.relays")
 
     if bool(nostr_provider.get("enabled", False)):
+        if not str(sender.get("encrypted_nsec") or "").strip():
+            raise ConfigError(
+                "notifications.providers.nostr.enabled is true but no encrypted sender nsec is configured"
+            )
         if not recipients:
             raise ConfigError("notifications.providers.nostr.enabled is true but no recipients are configured")
         if not relays:
             raise ConfigError("notifications.providers.nostr.enabled is true but no relays are configured")
+
+        min_successful_relays = int(nostr_provider.get("min_successful_relays", 1))
+        if min_successful_relays > len(relays):
+            raise ConfigError(
+                "notifications.providers.nostr.min_successful_relays cannot be greater than the relay count"
+            )
 
 
 def validate_config(config: dict[str, Any]) -> None:

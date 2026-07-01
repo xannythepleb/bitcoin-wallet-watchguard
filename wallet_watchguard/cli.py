@@ -34,16 +34,36 @@ from .derivation import derive_addresses
 from .db import Database
 from .electrum import ElectrumClient, default_tls_verify_for_host
 from .mempool import MempoolClient, format_mempool_fee_summary
-from .notifications import format_test_notification
+from .notifications import (
+    NotificationMessage,
+    NostrNotificationProvider,
+    format_test_notification,
+)
 from .ntfy import NtfyNotifier, decrypt_ntfy_config
-from .nostr import nostr_helper_availability_from_config, nostr_support_unavailable_message
+from .nostr import (
+    decrypt_nostr_sender_nsec,
+    ensure_nostr_helper_available,
+    generate_nostr_keypair,
+    nostr_helper_availability_from_config,
+    nostr_support_unavailable_message,
+)
 from .status import build_status_text, format_server_version, tor_upstream_lines
 from .tor import TorUpstreamManager, apply_tor_upstream, env_tor_upstream_enabled
 from .watcher import Watcher, get_passphrase_from_env_or_prompt
 from .healthcheck import main as healthcheck_main
 
 
-INIT_SECTIONS = ["full", "electrum", "ntfy", "wallet", "app", "mempool", "tor", "conversation"]
+INIT_SECTIONS = [
+    "full",
+    "electrum",
+    "ntfy",
+    "nostr",
+    "wallet",
+    "app",
+    "mempool",
+    "tor",
+    "conversation",
+]
 SATS_PER_BTC = Decimal("100000000")
 BTC_QUANTUM = Decimal("0.00000001")
 
@@ -233,6 +253,267 @@ def _encrypted_config_value(value: str, passphrase: str) -> tuple[str, dict[str,
     return encrypted_value, metadata_to_config(metadata)
 
 
+def _editable_notification_provider_config(config: dict, provider_name: str) -> dict:
+    notifications = config.get("notifications")
+    if not isinstance(notifications, dict):
+        notifications = {}
+        config["notifications"] = notifications
+
+    providers = notifications.get("providers")
+    if not isinstance(providers, dict):
+        providers = {}
+        notifications["providers"] = providers
+
+    provider_config = notification_provider_config(config, provider_name)
+    providers[provider_name] = provider_config
+    return provider_config
+
+
+def _split_csv_values(raw: str) -> list[str]:
+    values = []
+    for item in raw.replace("\n", ",").split(","):
+        value = item.strip()
+        if value:
+            values.append(value)
+    return values
+
+
+def _dedupe_preserving_order(values: list[str]) -> list[str]:
+    seen = set()
+    deduped = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
+
+
+def _parse_relay_list(raw: str) -> list[str]:
+    relays = _dedupe_preserving_order(_split_csv_values(raw))
+    if not relays:
+        raise ValueError("At least one Nostr relay is required")
+
+    for relay in relays:
+        if not relay.startswith(("wss://", "ws://")):
+            raise ValueError(f"Nostr relay must start with wss:// or ws://: {relay}")
+
+    return relays
+
+
+def _prompt_nostr_relays(existing_relays: list[str]) -> list[str]:
+    default_relays = ",".join(existing_relays or ["wss://nos.lol"])
+    while True:
+        raw = _prompt("Nostr relay URLs, comma-separated", default_relays)
+        try:
+            return _parse_relay_list(raw)
+        except ValueError as exc:
+            print(exc)
+
+
+def _recipient_npub(recipient: object) -> str:
+    if isinstance(recipient, str):
+        return recipient.strip()
+    if isinstance(recipient, dict):
+        return str(recipient.get("npub") or "").strip()
+    return ""
+
+
+def _recipient_name(recipient: object) -> str:
+    if isinstance(recipient, dict):
+        return str(recipient.get("name") or "").strip()
+    return ""
+
+
+def _prompt_nostr_recipients(existing_recipients: list[object]) -> list[object]:
+    existing_first = existing_recipients[0] if existing_recipients else {}
+    existing_npub = _recipient_npub(existing_first)
+    existing_name = _recipient_name(existing_first)
+
+    while True:
+        recipient_npub = _prompt(
+            "Recipient npub for encrypted Nostr DMs",
+            existing_npub,
+        ).strip()
+        if recipient_npub.startswith("npub1"):
+            break
+        print("Recipient npub must start with npub1.")
+
+    recipient_name = _prompt("Recipient name, blank for none", existing_name).strip()
+    if recipient_name:
+        return [{"name": recipient_name, "npub": recipient_npub}]
+    return [recipient_npub]
+
+
+def _encrypt_nostr_sender_nsec(nsec: str, passphrase: str) -> tuple[str, dict[str, object]]:
+    if not nsec.startswith("nsec1"):
+        raise ValueError("Generated Nostr secret key was not an nsec")
+    return _encrypted_config_value(nsec, passphrase)
+
+
+async def _send_nostr_setup_test_dm_async(
+    *,
+    helper_path: str,
+    sender_nsec: str,
+    nostr_config: dict,
+) -> None:
+    sender = nostr_config.get("sender") or {}
+    provider = NostrNotificationProvider(
+        helper_path=helper_path,
+        sender_nsec=sender_nsec,
+        recipients=list(nostr_config.get("recipients") or []),
+        relays=list(nostr_config.get("relays") or []),
+        min_successful_relays=int(nostr_config.get("min_successful_relays", 1)),
+        send_copy_to_self=bool(nostr_config.get("send_copy_to_self", True)),
+        connect_timeout_seconds=int(nostr_config.get("connect_timeout_seconds", 10)),
+        process_timeout_seconds=int(nostr_config.get("timeout_seconds", 30)),
+        configured_sender_npub=(
+            str(sender.get("npub") or "") if isinstance(sender, dict) else ""
+        ),
+    )
+    result = await provider.send(
+        NotificationMessage(
+            title="Wallet Watchguard Nostr test",
+            markdown_body="Wallet Watchguard Nostr encrypted DM test message.",
+            plain_body="Wallet Watchguard Nostr encrypted DM test message.",
+        )
+    )
+    if not result.ok:
+        raise RuntimeError(result.detail or "Nostr helper reported delivery failure")
+    print(f"Nostr test DM sent: {result.detail}")
+
+
+def _maybe_send_nostr_setup_test(
+    *,
+    helper_path: str,
+    sender_nsec: str,
+    nostr_config: dict,
+    prompt: bool,
+    default: bool = True,
+) -> None:
+    send_test = default
+    if prompt:
+        print()
+        send_test = _prompt_bool("Send a Nostr test DM now", default)
+
+    if not send_test:
+        print("Skipping Nostr test DM.")
+        return
+
+    try:
+        asyncio.run(
+            _send_nostr_setup_test_dm_async(
+                helper_path=helper_path,
+                sender_nsec=sender_nsec,
+                nostr_config=nostr_config,
+            )
+        )
+    except Exception as exc:
+        print(
+            f"warning: Nostr provider was configured, but the test DM failed: {exc}",
+            file=sys.stderr,
+        )
+
+
+def _configure_nostr_provider(
+    config: dict,
+    passphrase: str,
+    *,
+    force_generate: bool = False,
+    always_generate: bool = False,
+    prompt_for_test: bool = True,
+    send_test_default: bool = True,
+) -> dict:
+    availability = ensure_nostr_helper_available(config)
+    helper_path = availability.resolved_path or availability.configured_path
+    nostr_provider = _editable_notification_provider_config(config, "nostr")
+    nostr_provider["helper_path"] = str(
+        nostr_provider.get("helper_path") or availability.configured_path
+    )
+
+    sender = nostr_provider.get("sender") or {}
+    if not isinstance(sender, dict):
+        sender = {}
+
+    encrypted_nsec = str(sender.get("encrypted_nsec") or "").strip()
+    sender_nsec_for_test = ""
+
+    if encrypted_nsec and always_generate and not force_generate:
+        raise ValueError(
+            "Nostr sender key already exists. Re-run with --force to replace it."
+        )
+
+    should_generate = not encrypted_nsec or always_generate or force_generate
+    if encrypted_nsec and not always_generate and not force_generate:
+        existing_npub = str(sender.get("npub") or "").strip() or "not configured"
+        print()
+        print(f"Existing WWG Nostr sender npub: {existing_npub}")
+        print(
+            "Keeping the existing sender key. "
+            "Use `wwg nostr generate-key --force` to replace it."
+        )
+
+    if should_generate:
+        print()
+        print("Generating a dedicated WWG Nostr sender key with wwg-nostr...")
+        keypair = generate_nostr_keypair(helper_path)
+        encrypted_nsec, nsec_encryption = _encrypt_nostr_sender_nsec(
+            keypair.nsec,
+            passphrase,
+        )
+        nostr_provider["sender"] = {
+            "npub": keypair.npub,
+            "encrypted_nsec": encrypted_nsec,
+            "nsec_encryption": nsec_encryption,
+        }
+        sender_nsec_for_test = keypair.nsec
+        print(f"WWG sender npub: {keypair.npub}")
+    else:
+        nostr_provider["sender"] = sender
+        sender_nsec_for_test = decrypt_nostr_sender_nsec(nostr_provider, passphrase)
+
+    print()
+    print("Nostr recipient and relay settings")
+    nostr_provider["recipients"] = _prompt_nostr_recipients(
+        list(nostr_provider.get("recipients") or [])
+    )
+    nostr_provider["relays"] = _prompt_nostr_relays(
+        list(nostr_provider.get("relays") or [])
+    )
+    nostr_provider["min_successful_relays"] = int(
+        _prompt(
+            "Minimum successful relays required",
+            str(nostr_provider.get("min_successful_relays", 1)),
+        )
+    )
+    min_successful_relays = int(nostr_provider["min_successful_relays"])
+    if min_successful_relays < 1:
+        raise ValueError("Minimum successful relays must be at least 1")
+    if min_successful_relays > len(nostr_provider["relays"]):
+        raise ValueError(
+            "Minimum successful relays cannot be greater than the configured relay count"
+        )
+
+    nostr_provider["send_copy_to_self"] = _prompt_bool(
+        "Send a copy of each Nostr alert to the WWG sender npub",
+        bool(nostr_provider.get("send_copy_to_self", True)),
+    )
+    nostr_provider["enabled"] = _prompt_bool("Enable Nostr notifications", True)
+
+    if nostr_provider["enabled"]:
+        _maybe_send_nostr_setup_test(
+            helper_path=helper_path,
+            sender_nsec=sender_nsec_for_test,
+            nostr_config=nostr_provider,
+            prompt=prompt_for_test,
+            default=send_test_default,
+        )
+    else:
+        print("Nostr provider is configured but left disabled.")
+
+    return config
+
+
 def _print_missing_config_help(config_path: Path) -> None:
     print(file=sys.stderr)
     print(f"Config file not found: {config_path}", file=sys.stderr)
@@ -260,6 +541,10 @@ def _config_has_encrypted_values(config: dict) -> bool:
 
     conversation_auth = (config.get("conversation") or {}).get("auth") or {}
     if conversation_auth.get("encrypted_token") or conversation_auth.get("encrypted_password"):
+        return True
+
+    nostr_sender = notification_provider_config(config, "nostr").get("sender") or {}
+    if isinstance(nostr_sender, dict) and nostr_sender.get("encrypted_nsec"):
         return True
 
     for wallet in config.get("wallets") or []:
@@ -303,6 +588,15 @@ def _validate_existing_passphrase(config: dict, passphrase: str) -> None:
         except Exception as exc:
             raise ValueError("Passphrase did not decrypt existing ntfy credentials. No changes were made.") from exc
 
+    nostr_provider = notification_provider_config(config, "nostr")
+    nostr_sender = nostr_provider.get("sender") or {}
+    if isinstance(nostr_sender, dict) and nostr_sender.get("encrypted_nsec"):
+        checked_any = True
+        try:
+            decrypt_nostr_sender_nsec(nostr_provider, passphrase)
+        except Exception as exc:
+            raise ValueError("Passphrase did not decrypt the Nostr sender key. No changes were made.") from exc
+
     if not checked_any and _config_has_encrypted_values(config):
         print(
             "warning: existing encrypted values were found, but this command could not validate them before continuing.",
@@ -326,7 +620,7 @@ def _get_encryption_passphrase(
     else:
         print()
         print("Set the passphrase used to encrypt sensitive values in config.yaml.")
-        print("This passphrase encrypts your xpub and ntfy credentials at rest.")
+        print("This passphrase encrypts your xpub, ntfy credentials, and Nostr sender key at rest.")
         print("You will need it whenever Wallet Watchguard starts.")
         passphrase = prompt_new_passphrase()
 
@@ -948,6 +1242,15 @@ def _apply_section(config: dict, section: str, args: argparse.Namespace) -> dict
         config["ntfy"] = _prompt_ntfy_config(passphrase, config.get("ntfy"))
         return config
 
+    if section == "nostr":
+        ensure_nostr_helper_available(config)
+        passphrase = _get_encryption_passphrase(
+            args,
+            existing_secret=_config_has_encrypted_values(config),
+            config=config,
+        )
+        return _configure_nostr_provider(config, passphrase)
+
     if section == "wallet":
         passphrase = _get_encryption_passphrase(args, existing_secret=_config_has_encrypted_values(config), config=config)
         config.setdefault("wallets", [])
@@ -978,14 +1281,15 @@ def _choose_section_to_add() -> str:
         "What would you like to configure?",
         {
             "1": "ntfy credentials/server/topic",
-            "2": "Electrum/Fulcrum node",
-            "3": "Add wallet xpub",
-            "4": "Application settings",
-            "5": "Optional Mempool API enrichment",
-            "6": "Tor upstream for onion Electrum/Fulcrum nodes",
-            "7": "Conversation Mode",
-            "8": "Full setup wizard",
-            "9": "Cancel",
+            "2": "Nostr encrypted DM notifications",
+            "3": "Electrum/Fulcrum node",
+            "4": "Add wallet xpub",
+            "5": "Application settings",
+            "6": "Optional Mempool API enrichment",
+            "7": "Tor upstream for onion Electrum/Fulcrum nodes",
+            "8": "Conversation Mode",
+            "9": "Full setup wizard",
+            "10": "Cancel",
         },
         default="1",
     )
@@ -994,14 +1298,15 @@ def _choose_section_to_add() -> str:
 def _section_from_menu_choice(choice: str) -> str | None:
     return {
         "1": "ntfy",
-        "2": "electrum",
-        "3": "wallet",
-        "4": "app",
-        "5": "mempool",
-        "6": "tor",
-        "7": "conversation",
-        "8": "full",
-        "9": None,
+        "2": "nostr",
+        "3": "electrum",
+        "4": "wallet",
+        "5": "app",
+        "6": "mempool",
+        "7": "tor",
+        "8": "conversation",
+        "9": "full",
+        "10": None,
     }[choice]
 
 
@@ -2340,6 +2645,47 @@ def cmd_tor_disable(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_nostr_generate_key(args: argparse.Namespace) -> int:
+    config_path = Path(args.config)
+    config_exists = config_path.exists()
+    config = load_config_for_edit(config_path)
+
+    if not config_exists:
+        print()
+        print(
+            f"No existing config found at {config_path}; "
+            "creating one with Nostr configured."
+        )
+
+    ensure_nostr_helper_available(config)
+    nostr_sender = notification_provider_config(config, "nostr").get("sender") or {}
+    if (
+        isinstance(nostr_sender, dict)
+        and nostr_sender.get("encrypted_nsec")
+        and not bool(args.force)
+    ):
+        raise ValueError(
+            "Nostr sender key already exists. Re-run with --force to replace it."
+        )
+
+    passphrase = _get_encryption_passphrase(
+        args,
+        existing_secret=_config_has_encrypted_values(config),
+        config=config,
+    )
+    config = _configure_nostr_provider(
+        config,
+        passphrase,
+        force_generate=bool(args.force),
+        always_generate=True,
+        prompt_for_test=not bool(args.no_test),
+        send_test_default=not bool(args.no_test),
+    )
+    save_config(config_path, config)
+    _print_save_summary(config_path, config)
+    return 0
+
+
 def cmd_nostr_status(args: argparse.Namespace) -> int:
     config_path = Path(args.config)
 
@@ -2402,7 +2748,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--add",
         choices=INIT_SECTIONS,
         default=None,
-        help="Jump directly to a setup section: full, electrum, ntfy, wallet, app, mempool, tor, or Conversation Mode",
+        help=(
+            "Jump directly to a setup section: full, electrum, ntfy, nostr, "
+            "wallet, app, mempool, tor, or Conversation Mode"
+        ),
     )
     p_init.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt")
     p_init.set_defaults(func=cmd_init)
@@ -2653,8 +3002,34 @@ def build_parser() -> argparse.ArgumentParser:
     _add_tor_upstream_arg(p_test_tor)
     p_test_tor.set_defaults(func=cmd_test_tor)
 
-    p_nostr = sub.add_parser("nostr", help="Inspect Nostr notification helper availability")
+    p_nostr = sub.add_parser("nostr", help="Manage Nostr encrypted DM notifications")
     nostr_sub = p_nostr.add_subparsers(dest="nostr_command", required=True)
+
+    p_nostr_generate = nostr_sub.add_parser(
+        "generate-key",
+        aliases=["setup"],
+        help=(
+            "Generate and encrypt a WWG Nostr sender key, "
+            "then configure recipients and relays"
+        ),
+    )
+    p_nostr_generate.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_nostr_generate.add_argument(
+        "--passphrase",
+        default=None,
+        help="Encryption passphrase; otherwise prompt",
+    )
+    p_nostr_generate.add_argument(
+        "--force",
+        action="store_true",
+        help="Replace an existing encrypted WWG Nostr sender key",
+    )
+    p_nostr_generate.add_argument(
+        "--no-test",
+        action="store_true",
+        help="Do not offer to send a Nostr test DM during setup",
+    )
+    p_nostr_generate.set_defaults(func=cmd_nostr_generate_key)
 
     p_nostr_status = nostr_sub.add_parser(
         "status",
