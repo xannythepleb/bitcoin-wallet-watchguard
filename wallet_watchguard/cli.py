@@ -34,8 +34,8 @@ from .derivation import derive_addresses
 from .db import Database
 from .electrum import ElectrumClient, default_tls_verify_for_host
 from .mempool import MempoolClient, format_mempool_fee_summary
-from .notifications import build_notification_manager, format_test_notification
-from .ntfy import decrypt_ntfy_config
+from .notifications import format_test_notification
+from .ntfy import NtfyNotifier, decrypt_ntfy_config
 from .nostr import nostr_helper_availability_from_config, nostr_support_unavailable_message
 from .status import build_status_text, format_server_version, tor_upstream_lines
 from .tor import TorUpstreamManager, apply_tor_upstream, env_tor_upstream_enabled
@@ -1147,8 +1147,14 @@ def _print_tor_next_steps(config_path: Path, *, enabled: bool) -> None:
 
 
 async def _cmd_test_ntfy_async(config: dict, passphrase: str) -> None:
-    notifications, _ = build_notification_manager(config, passphrase)
-    await notifications.send(format_test_notification())
+    message = format_test_notification()
+    notifier = NtfyNotifier(decrypt_ntfy_config(config["ntfy"], passphrase))
+    await notifier.send(
+        message.title,
+        message.markdown_body,
+        priority=message.priority,
+        tags=message.tags,
+    )
 
 
 async def _cmd_test_tor_async(config: dict) -> str:
@@ -2362,7 +2368,10 @@ def cmd_nostr_status(args: argparse.Namespace) -> int:
     if availability.available:
         print()
         print("The Nostr helper is available for this build.")
-        print("Encrypted DM delivery will be wired in when the Rust Nostr helper integration lands.")
+        if enabled:
+            print("Encrypted DM delivery is enabled and will use the configured helper at runtime.")
+        else:
+            print("Encrypted DM delivery is ready once the Nostr provider is enabled and configured.")
         return 0
 
     print()

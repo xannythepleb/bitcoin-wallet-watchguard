@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import notification_provider_config
+from .crypto import decrypt_string_with_passphrase, metadata_from_config
 
 logger = logging.getLogger("wwg.nostr")
 
@@ -84,6 +85,31 @@ def nostr_support_unavailable_message(availability: NostrHelperAvailability) -> 
         f"{detail}.\n"
         "Slim Docker images are ntfy-only. Use the full image to enable Nostr notifications, "
         "or disable the Nostr provider in config.yaml."
+    )
+
+
+def decrypt_nostr_sender_nsec(nostr_config: dict[str, Any], passphrase: str) -> str:
+    sender = nostr_config.get("sender") or {}
+    if not isinstance(sender, dict):
+        raise ValueError("notifications.providers.nostr.sender must be an object")
+
+    encrypted_nsec = str(sender.get("encrypted_nsec") or "").strip()
+    if not encrypted_nsec:
+        raise ValueError(
+            "Nostr notifications are enabled but no encrypted sender nsec is configured"
+        )
+
+    encryption_config = sender.get("nsec_encryption") or {}
+    if not isinstance(encryption_config, dict):
+        raise ValueError(
+            "notifications.providers.nostr.sender.nsec_encryption must be an object"
+        )
+
+    return decrypt_string_with_passphrase(
+        encrypted_value_b64=encrypted_nsec,
+        passphrase=passphrase,
+        metadata=metadata_from_config(encryption_config),
+        secret_name="Nostr sender nsec",
     )
 
 

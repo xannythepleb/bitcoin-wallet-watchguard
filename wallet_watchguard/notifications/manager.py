@@ -47,8 +47,15 @@ class NotificationManager:
 
         for provider in self.providers:
             try:
-                results.append(await provider.send(message))
-                logger.debug("Provider %s delivered %r", provider.name, message.title)
+                result = await provider.send(message)
+                results.append(result)
+                if result.ok:
+                    logger.debug("Provider %s delivered %r", provider.name, message.title)
+                else:
+                    logger.warning(
+                        "Provider %s reported delivery failure for %r: %s",
+                        provider.name, message.title, result.detail or "failed",
+                    )
             except Exception as exc:
                 logger.warning("Provider %s failed to deliver %r: %s", provider.name, message.title, exc)
                 results.append(
