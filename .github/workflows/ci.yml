@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  contents: write
 
 jobs:
   python:
@@ -41,8 +42,24 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Format check
-        run: cargo fmt --check
+      - name: Format Rust
+        run: cargo fmt
+
+      - name: Commit Rust formatting changes
+        if: github.event_name == 'push'
+        working-directory: .
+        run: |
+          if git diff --quiet; then
+            echo "No Rust formatting changes."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add derivation-helper/src
+          git commit -m "chore: format Rust code"
+          git push
 
       - name: Clippy
         run: cargo clippy --release
