@@ -754,6 +754,61 @@ def _configure_nostr_provider(
     return config
 
 
+
+def _prompt_notification_provider_setup_choice() -> str:
+    print()
+    print("Notification provider setup")
+    aliases = {
+        "1": "ntfy",
+        "n": "ntfy",
+        "ntfy": "ntfy",
+        "2": "nostr",
+        "nostr": "nostr",
+        "3": "both",
+        "all": "both",
+        "both": "both",
+    }
+
+    while True:
+        value = _prompt(
+            "Do you want to configure Ntfy, Nostr, or both?",
+            "Ntfy",
+        ).strip().lower()
+        if value in aliases:
+            return aliases[value]
+        print("Please choose Ntfy, Nostr, or both.")
+
+
+def _prompt_notification_provider_config(
+    config: dict,
+    passphrase: str,
+) -> dict:
+    provider_choice = _prompt_notification_provider_setup_choice()
+    configure_ntfy = provider_choice in {"ntfy", "both"}
+    configure_nostr = provider_choice in {"nostr", "both"}
+
+    _set_notification_provider_enabled(config, "ntfy", enabled=configure_ntfy)
+    if not configure_nostr:
+        _set_notification_provider_enabled(config, "nostr", enabled=False)
+
+    if configure_ntfy:
+        config["ntfy"] = _prompt_ntfy_config(passphrase, config.get("ntfy"))
+    else:
+        print()
+        print("Skipping ntfy notification setup for now.")
+        print("You can configure it later with:")
+        print("  wwg init --add ntfy")
+
+    if configure_nostr:
+        config = _configure_nostr_provider(config, passphrase)
+    else:
+        print()
+        print("Skipping Nostr encrypted DM notification setup for now.")
+        print("You can configure it later with:")
+        print("  wwg init --add nostr")
+
+    return config
+
 def _print_missing_config_help(config_path: Path) -> None:
     print(file=sys.stderr)
     print(f"Config file not found: {config_path}", file=sys.stderr)
@@ -1444,7 +1499,7 @@ def _apply_full_setup(config: dict, args: argparse.Namespace, *, existing_secret
     passphrase = _get_encryption_passphrase(args, existing_secret=existing_secret, config=config)
     config["app"] = _prompt_app_config(config.get("app"))
     config["electrum"] = _prompt_electrum_config(config.get("electrum"))
-    config["ntfy"] = _prompt_ntfy_config(passphrase, config.get("ntfy"))
+    config = _prompt_notification_provider_config(config, passphrase)
     config["mempool"] = _prompt_mempool_config(config.get("mempool"))
     config["tor"] = _prompt_tor_config(config.get("tor"))
     config["conversation"] = _prompt_conversation_config(passphrase, config.get("conversation"), config.get("ntfy"))

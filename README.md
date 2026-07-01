@@ -278,6 +278,31 @@ Tx: abc123...
 
 As you can see, Mempool allows WWG to pick up the amount, whether it was sent or received, details of the input and output, and fee paid. Instructions on how to configure Mempool integration are further down.
 
+## Nostr Notifications
+
+Currently, Conversation Mode is only available with Ntfy. However, you can configure Nostr for notifications. Nostr notifications use NIP-17 DMs that protect both the message and the metadata via NIP-44 encryption and NIP-59 gift wrapping.
+
+The initial setup wizard will ask you if you want to configure Ntfy, Nostr, or both.
+
+If you already configured WWG, you can add a Nostr config at any time by running:
+
+```bash
+docker compose exec wallet-watchguard wwg init --add nostr
+```
+
+This will create an npub for your WWG instance, ask for your npub (you can add multiple if you wish), and of course the relays you want to use - make sure these relays are configured as your DM inbox relays so the DMs reach your Nostr client.
+
+WWG will then print its npub and follow yours. It is recommended you follow it back so the DMs don't get filtered out by your client. If you follow each other, this also allows you to use WoT relays for your WWG notifications.
+
+You can enable or disable the notification providers you have configured via the CLI:
+
+```bash
+docker compose exec wallet-watchguard wwg enable nostr
+docker compose exec wallet-watchguard wwg enable ntfy
+docker compose exec wallet-watchguard wwg disable nostr
+docker compose exec wallet-watchguard wwg disable ntfy
+```
+
 ## Conversation Mode: Talk to Your Wallet Anywhere
 
 Conversation Mode lets you query Wallet Watchguard remotely through ntfy. You can keep an eye on even your hardware cold storage wherever you are via 100% self-hosted infrastructure. No third party middleman if you configure it correctly with your own node and your own ntfy instance. You can run both of these on your own physical hardware using Start9 or Umbrel for true sovereignty.
