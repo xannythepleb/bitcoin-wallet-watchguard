@@ -72,6 +72,7 @@ INIT_SECTIONS = [
 SATS_PER_BTC = Decimal("100000000")
 BTC_QUANTUM = Decimal("0.00000001")
 NOTIFICATION_PROVIDER_CHOICES = ("all", "ntfy", "nostr")
+NOTIFICATION_PROVIDER_TOGGLE_CHOICES = ("ntfy", "nostr")
 
 def _prompt(label: str, default: str | None = None, *, display_default: str | None = None) -> str:
     # display_default lets us show a friendly hint (e.g. "not yet set") while
@@ -275,6 +276,83 @@ def _editable_notification_provider_config(config: dict, provider_name: str) -> 
     return provider_config
 
 
+def _set_notification_provider_enabled(
+    config: dict,
+    provider_name: str,
+    *,
+    enabled: bool,
+) -> bool:
+    if provider_name not in NOTIFICATION_PROVIDER_TOGGLE_CHOICES:
+        raise ValueError(f"Unsupported notification provider: {provider_name}")
+
+    provider_config = _editable_notification_provider_config(config, provider_name)
+    was_enabled = bool(provider_config.get("enabled", False))
+    provider_config["enabled"] = enabled
+    return was_enabled
+
+
+def _enabled_notification_provider_names(config: dict) -> list[str]:
+    enabled_providers = []
+    for provider_name in NOTIFICATION_PROVIDER_TOGGLE_CHOICES:
+        provider_config = notification_provider_config(config, provider_name)
+        if bool(provider_config.get("enabled", False)):
+            enabled_providers.append(provider_name)
+    return enabled_providers
+
+
+def _print_notification_provider_toggle_summary(
+    config_path: Path,
+    config: dict,
+    provider_name: str,
+    *,
+    enabled: bool,
+    was_enabled: bool,
+) -> None:
+    state = "enabled" if enabled else "disabled"
+    previous_state = "enabled" if was_enabled else "disabled"
+    if was_enabled == enabled:
+        print(f"{provider_name} notification provider was already {state}.")
+    else:
+        print(
+            f"{provider_name} notification provider changed "
+            f"from {previous_state} to {state}."
+        )
+    print(f"Updated {config_path}")
+
+    enabled_providers = _enabled_notification_provider_names(config)
+    print(
+        "Enabled notification providers: "
+        f"{', '.join(enabled_providers) if enabled_providers else 'none'}"
+    )
+
+    if enabled and provider_name == "nostr":
+        nostr_config = notification_provider_config(config, "nostr")
+        sender = nostr_config.get("sender") or {}
+        encrypted_nsec = ""
+        if isinstance(sender, dict):
+            encrypted_nsec = str(sender.get("encrypted_nsec") or "").strip()
+
+        missing = []
+        if not encrypted_nsec:
+            missing.append("encrypted sender nsec")
+        if not list(nostr_config.get("recipients") or []):
+            missing.append("recipient npub")
+        if not list(nostr_config.get("relays") or []):
+            missing.append("relay")
+        if missing:
+            print()
+            print(
+                "Nostr is enabled, but it is not fully configured yet: "
+                f"missing {', '.join(missing)}."
+            )
+            print("Run `wwg nostr setup` to generate a sender key and configure DMs.")
+
+    print()
+    print("Restart WWG so the running watcher picks up the config change:")
+    print("  docker compose restart wallet-watchguard")
+    print("If you run WWG locally, stop and start your `wwg run` process instead.")
+
+
 def _split_csv_values(raw: str) -> list[str]:
     values = []
     for item in raw.replace("\n", ",").split(","):
@@ -395,7 +473,7 @@ async def _send_nostr_setup_test_dm_async(
     )
     result = await provider.send(
         NotificationMessage(
-            title="Wallet Watchguard Nostr test",
+            title="Bitcoin Wallet Watchguard - ⚡ xanny@cake.cash",
             markdown_body="Wallet Watchguard Nostr encrypted DM test message.",
             plain_body="Wallet Watchguard Nostr encrypted DM test message.",
         )
@@ -1562,7 +1640,7 @@ def _add_tor_upstream_arg(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _load_config_for_persistent_tor_edit(config_path: Path) -> dict:
+def _load_config_for_persistent_edit(config_path: Path) -> dict:
     if not config_path.exists():
         _print_missing_config_help(config_path)
         raise FileNotFoundError(f"Config file not found: {config_path}")
@@ -1571,6 +1649,10 @@ def _load_config_for_persistent_tor_edit(config_path: Path) -> dict:
         raise IsADirectoryError(f"Config path is a directory, not a file: {config_path}")
 
     return load_config_for_edit(config_path)
+
+
+def _load_config_for_persistent_tor_edit(config_path: Path) -> dict:
+    return _load_config_for_persistent_edit(config_path)
 
 
 def _set_persistent_tor_enabled(config: dict, *, enabled: bool) -> dict:
@@ -2832,6 +2914,28 @@ def cmd_tor_disable(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_notification_provider_toggle(args: argparse.Namespace) -> int:
+    config_path = Path(args.config)
+    config = _load_config_for_persistent_edit(config_path)
+    provider_name = str(args.provider)
+    enabled = bool(args.provider_enabled)
+    was_enabled = _set_notification_provider_enabled(
+        config,
+        provider_name,
+        enabled=enabled,
+    )
+    save_config(config_path, config)
+
+    _print_notification_provider_toggle_summary(
+        config_path,
+        config,
+        provider_name,
+        enabled=enabled,
+        was_enabled=was_enabled,
+    )
+    return 0
+
+
 def cmd_nostr_generate_key(args: argparse.Namespace) -> int:
     config_path = Path(args.config)
     config_exists = config_path.exists()
@@ -2986,6 +3090,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_add_wallet.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     p_add_wallet.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt")
     p_add_wallet.set_defaults(func=cmd_init, reset=False, add="wallet")
+
+    p_enable = sub.add_parser("enable", help="Enable a notification provider in config.yaml")
+    p_enable.add_argument("provider", choices=NOTIFICATION_PROVIDER_TOGGLE_CHOICES)
+    p_enable.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_enable.set_defaults(
+        func=cmd_notification_provider_toggle,
+        provider_enabled=True,
+    )
+
+    p_disable = sub.add_parser("disable", help="Disable a notification provider in config.yaml")
+    p_disable.add_argument("provider", choices=NOTIFICATION_PROVIDER_TOGGLE_CHOICES)
+    p_disable.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_disable.set_defaults(
+        func=cmd_notification_provider_toggle,
+        provider_enabled=False,
+    )
 
     p_enc = sub.add_parser("encrypt-xpub", help="Encrypt an xpub for storage in YAML")
     p_enc.add_argument("--xpub", required=True)
