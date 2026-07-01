@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import ipaddress
+import logging
 import ssl
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -11,6 +12,8 @@ try:
     from python_socks.async_.asyncio import Proxy
 except Exception:  # pragma: no cover - optional dependency import guard
     Proxy = None  # type: ignore[assignment]
+
+logger = logging.getLogger("wwg.electrum")
 
 NotificationHandler = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -48,6 +51,7 @@ class ElectrumClient:
         tls_verify: bool | None = None,
         socks_proxy: str | None = None,
         timeout_seconds: int = 30,
+        ping_interval_seconds: int = 120,
     ) -> None:
         self.host = host
         self.port = port
@@ -55,6 +59,10 @@ class ElectrumClient:
         self.tls_verify = default_tls_verify_for_host(host) if tls_verify is None else tls_verify
         self.socks_proxy = socks_proxy
         self.timeout_seconds = timeout_seconds
+        # Keepalive: many Electrum servers (ElectrumX defaults to 600s) close idle
+        # sessions, which silently kills live subscription pushes. A periodic
+        # server.ping keeps the session alive. <= 0 disables it.
+        self.ping_interval_seconds = ping_interval_seconds
         self.reader: asyncio.StreamReader | None = None
         self.writer: asyncio.StreamWriter | None = None
         self._next_id = 0
@@ -93,6 +101,10 @@ class ElectrumClient:
                 ssl=ssl_context,
                 server_hostname=self.host if self.use_tls else None,
             )
+            logger.info(
+                "Connected to Electrum %s:%s via SOCKS %s (tls=%s)",
+                self.host, self.port, self.socks_proxy, self.use_tls,
+            )
             return
 
         self.reader, self.writer = await asyncio.wait_for(
@@ -103,6 +115,9 @@ class ElectrumClient:
                 server_hostname=self.host if self.use_tls and self.tls_verify else None,
             ),
             timeout=self.timeout_seconds,
+        )
+        logger.info(
+            "Connected to Electrum %s:%s (tls=%s)", self.host, self.port, self.use_tls
         )
 
     async def close(self) -> None:
@@ -163,12 +178,62 @@ class ElectrumClient:
         if self.reader is None:
             raise ElectrumError("Electrum client is not connected")
 
+        # Run the socket reader and the keepalive pinger concurrently. If either
+        # stops, the connection is finished: the reader raises on a normal
+        # disconnect, and the pinger raises when a half-open connection stops
+        # answering (which readline() alone would never notice). Surfacing the
+        # first failure lets the daemon's supervisor tear down and restart.
+        read_task = asyncio.create_task(self._read_loop(handler))
+        ping_task = asyncio.create_task(self._keepalive())
+        logger.info(
+            "Electrum listener started (keepalive %s)",
+            f"every {self.ping_interval_seconds}s" if self.ping_interval_seconds > 0 else "disabled",
+        )
+        try:
+            done, _pending = await asyncio.wait(
+                {read_task, ping_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in done:
+                exc = task.exception()
+                if exc is not None:
+                    logger.warning("Electrum listener stopping: %r", exc)
+                    raise exc
+            # Neither should return without raising.
+            raise ElectrumError("Electrum listener stopped unexpectedly")
+        finally:
+            for task in (read_task, ping_task):
+                task.cancel()
+            await asyncio.gather(read_task, ping_task, return_exceptions=True)
+
+    async def _keepalive(self) -> None:
+        if self.ping_interval_seconds <= 0:
+            # Disabled: never complete, so it never trips the listener supervisor.
+            await asyncio.Event().wait()
+            return
+
+        while True:
+            await asyncio.sleep(self.ping_interval_seconds)
+            try:
+                await self.call("server.ping")
+                logger.debug("Keepalive ping OK")
+            except Exception as exc:
+                # A failed/timed-out ping means the connection is effectively dead.
+                raise ElectrumError(f"Keepalive ping failed: {exc}") from exc
+
+    async def _read_loop(self, handler: NotificationHandler) -> None:
+        assert self.reader is not None
         while True:
             line = await self.reader.readline()
             if not line:
                 raise ElectrumError("Electrum server disconnected")
 
-            message = json.loads(line.decode("utf-8"))
+            try:
+                message = json.loads(line.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                # Log the offending line (truncated) so a misbehaving server or
+                # framing bug is debuggable rather than an opaque crash.
+                logger.error("Discarding undecodable Electrum message: %r (%s)", line[:200], exc)
+                continue
 
             if "id" in message and message["id"] in self._pending:
                 fut = self._pending.pop(message["id"])
@@ -184,7 +249,7 @@ class ElectrumClient:
                 # Do not await the notification handler in the socket reader loop.
                 # Wallet Watchguard's handler needs to issue follow-up Electrum
                 # calls such as blockchain.scripthash.get_history. Those call()
-                # futures are completed by this same listen() loop when it reads
+                # futures are completed by this same read loop when it reads
                 # the server response, so awaiting the handler here deadlocks live
                 # subscription processing. Dispatching the handler lets the reader
                 # keep draining JSON-RPC responses and push notifications.

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,31 @@ from .notifications import (
 )
 from .status import build_status_text, format_server_version
 from .tor import TorUpstreamManager
+
+
+logger = logging.getLogger("wwg")
+
+
+def configure_logging() -> None:
+    """Attach a timestamped stdout handler to the 'wwg' logger tree.
+
+    Idempotent, and it leaves the root logger alone so third-party library
+    logs aren't unleashed. Level is controlled by WWG_LOG_LEVEL (default INFO);
+    set it to DEBUG to see keepalive pings and per-message detail.
+    """
+    if logger.handlers:
+        return
+    level_name = os.environ.get("WWG_LOG_LEVEL", "INFO").upper()
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s: %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S%z",
+        )
+    )
+    logger.addHandler(handler)
+    logger.setLevel(getattr(logging, level_name, logging.INFO))
+    logger.propagate = False
 
 
 class Watcher:
@@ -58,15 +85,18 @@ class Watcher:
             tls_verify=electrum.get("tls_verify"),
             socks_proxy=electrum.get("socks_proxy"),
             timeout_seconds=int(electrum.get("timeout_seconds", 30)),
+            ping_interval_seconds=int(electrum.get("ping_interval_seconds", 120)),
         )
 
     async def run(self) -> None:
+        configure_logging()
         listener: asyncio.Task | None = None
         conversation_task: asyncio.Task | None = None
         autobalance_task: asyncio.Task | None = None
 
         await self.db.connect()
         try:
+            logger.info("Wallet Watchguard starting")
             await self.tor_upstream.start()
             await self.client.connect()
             listener = asyncio.create_task(self.client.listen(self._handle_notification))
@@ -156,7 +186,9 @@ class Watcher:
         for task in done:
             exc = task.exception()
             if exc is not None:
-                print(f"Critical background task exited: {exc!r}", flush=True)
+                # exc_info logs the full traceback so a periodic crash can be
+                # diagnosed from the container logs, not just its message.
+                logger.error("Critical background task exited; shutting down for restart", exc_info=exc)
                 raise exc
         # A supervised loop returned without raising; none should stop on its own.
         raise RuntimeError("A critical background task stopped unexpectedly; restarting daemon")
@@ -722,14 +754,16 @@ class Watcher:
             if last_sent is not None:
                 remaining = interval_seconds - (time.time() - last_sent)
                 if remaining > 0:
+                    logger.debug("Autobalance not due yet; sleeping %.0fs", remaining)
                     await asyncio.sleep(remaining)
                     continue
 
             try:
                 await self._send_autobalance_notification()
                 await self.db.set_autobalance_last_sent(time.time())
+                logger.info("Autobalance summary sent; next in %sh", interval_hours)
             except Exception as exc:
-                print(f"Autobalance notification failed: {exc}", flush=True)
+                logger.error("Autobalance notification failed: %s", exc, exc_info=exc)
 
             await asyncio.sleep(interval_seconds)
 
