@@ -5,8 +5,10 @@ from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 from typing import Any
 
-from .config import DEFAULT_CONFIG_PATH, DEFAULT_DATABASE_PATH
+from .config import DEFAULT_CONFIG_PATH, DEFAULT_DATABASE_PATH, notification_providers_config
+from .nostr import nostr_helper_availability
 from .tor import tor_config_from_app_config
+
 
 def get_app_version() -> str:
     try:
@@ -146,6 +148,76 @@ def tor_upstream_line(config: dict[str, Any], *, use_emoji: bool = True) -> str:
     return "\n".join(tor_upstream_lines(config, use_emoji=use_emoji))
 
 
+def _count_nostr_recipients(recipients: Any) -> int:
+    return len(recipients) if isinstance(recipients, list) else 0
+
+
+
+
+def _nostr_sender_npub(nostr_config: dict[str, Any]) -> str:
+    sender = nostr_config.get("sender") or {}
+    if not isinstance(sender, dict):
+        return "not configured"
+
+    npub = str(sender.get("npub") or "").strip()
+    return npub or "not configured"
+
+
+def _count_nostr_relays(nostr_config: dict[str, Any]) -> int:
+    relay_urls: set[str] = set()
+
+    relays = nostr_config.get("relays") or []
+    if isinstance(relays, list):
+        relay_urls.update(str(relay).strip() for relay in relays if str(relay).strip())
+
+    recipients = nostr_config.get("recipients") or []
+    if isinstance(recipients, list):
+        for recipient in recipients:
+            if isinstance(recipient, dict):
+                recipient_relays = recipient.get("relays") or []
+                if isinstance(recipient_relays, list):
+                    relay_urls.update(str(relay).strip() for relay in recipient_relays if str(relay).strip())
+
+    return len(relay_urls)
+
+
+def notification_status_lines(
+    config: dict[str, Any],
+    *,
+    ntfy_config: dict[str, Any] | None = None,
+    use_emoji: bool = True,
+) -> list[str]:
+    providers = notification_providers_config(config)
+    ntfy = ntfy_config or config["ntfy"]
+    ntfy_provider = providers.get("ntfy") or {}
+    nostr_provider = providers.get("nostr") or {}
+
+    lines = [_label("Notifications:", "🔔", use_emoji=use_emoji)]
+
+    if bool(ntfy_provider.get("enabled", True)):
+        lines.append(
+            f"   - ntfy: enabled {str(ntfy['server']).rstrip('/')}/{ntfy['topic']} "
+            f"auth={(ntfy.get('auth') or {}).get('type', 'none')} "
+            f"tls_verify={_format_bool(bool(ntfy.get('tls_verify', True)))}"
+        )
+    else:
+        lines.append("   - ntfy: disabled")
+
+    nostr_enabled = bool(nostr_provider.get("enabled", False))
+    nostr_status = "enabled" if nostr_enabled else "disabled"
+    nostr_recipients = _count_nostr_recipients(nostr_provider.get("recipients") or [])
+    nostr_relays = _count_nostr_relays(nostr_provider)
+    nostr_sender_npub = _nostr_sender_npub(nostr_provider)
+    nostr_helper = nostr_helper_availability(nostr_provider)
+    lines.append(
+        f"   - Nostr: {nostr_status} recipients={nostr_recipients} "
+        f"relays={nostr_relays} WWG npub={nostr_sender_npub} "
+        f"helper={nostr_helper.status_text}"
+    )
+
+    return lines
+
+
 def build_status_text(
     config: dict[str, Any],
     *,
@@ -202,11 +274,7 @@ def build_status_text(
     )
     lines.extend(tor_upstream_lines(config, use_emoji=use_emoji))
 
-    lines.append(
-        f"{_label('ntfy:', '🔔', use_emoji=use_emoji)} {str(ntfy['server']).rstrip('/')}/{ntfy['topic']} "
-        f"auth={(ntfy.get('auth') or {}).get('type', 'none')} "
-        f"tls_verify={_format_bool(bool(ntfy.get('tls_verify', True)))}"
-    )
+    lines.extend(notification_status_lines(config, ntfy_config=ntfy, use_emoji=use_emoji))
 
     mempool_enabled = bool(mempool_config.get("enabled", False))
     mempool_base_url = str(mempool_config.get("base_url", "") or "")
@@ -268,6 +336,7 @@ def build_status_text(
                 "  wwg addresses --all --include-change --limit 20",
                 "  wwg test-ntfy",
                 "  wwg test-tor",
+                "  wwg nostr status",
                 "  wwg tor status",
                 "  wwg init --add <section>",
             ]

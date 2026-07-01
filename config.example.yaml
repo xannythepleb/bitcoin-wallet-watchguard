@@ -56,6 +56,30 @@ ntfy:
   tls_verify: true
   timeout_seconds: 15
 
+# Notification provider switches.
+#
+# ntfy keeps its detailed settings in the top-level ntfy section above for now.
+# Nostr support will use a dedicated Rust helper in full builds. Slim builds can
+# leave Nostr disabled and remain ntfy only.
+notifications:
+  providers:
+    ntfy:
+      enabled: true
+
+    nostr:
+      enabled: false
+      helper_path: "./wwg-nostr"
+      sender:
+        # Public WWG sender identity shown by `wwg status`.
+        npub: ""
+        # The setup wizard will write an encrypted nsec here.
+        encrypted_nsec: ""
+        nsec_encryption: {}
+      recipients: []
+      relays: []
+      min_successful_relays: 1
+      send_copy_to_self: true
+
 # Optional: enrich notifications with decoded transaction details, fee,
 # vsize and fee rate from a local Mempool instance.
 #

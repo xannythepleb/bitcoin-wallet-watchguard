@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import getpass
 import secrets
 import sys
@@ -11,7 +12,16 @@ from urllib.parse import quote, urlencode, urlparse, urlunparse
 
 import yaml
 
-from .config import DEFAULT_CONFIG_PATH, DEFAULT_DATABASE_PATH, PLACEHOLDER_NTFY_TOPIC, default_config, load_config, load_config_for_edit, save_config
+from .config import (
+    DEFAULT_CONFIG_PATH,
+    DEFAULT_DATABASE_PATH,
+    PLACEHOLDER_NTFY_TOPIC,
+    default_config,
+    load_config,
+    load_config_for_edit,
+    notification_provider_config,
+    save_config,
+)
 from .crypto import (
     decrypt_xpub_with_passphrase,
     encrypt_string_with_passphrase,
@@ -25,16 +35,44 @@ from .derivation import derive_addresses
 from .db import Database
 from .electrum import ElectrumClient, default_tls_verify_for_host
 from .mempool import MempoolClient, format_mempool_fee_summary
+from .notifications import (
+    NotificationMessage,
+    NotificationResult,
+    NostrNotificationProvider,
+    build_notification_manager,
+    format_test_notification,
+)
 from .ntfy import NtfyNotifier, decrypt_ntfy_config
+from .nostr import (
+    decrypt_nostr_sender_nsec,
+    ensure_nostr_helper_available,
+    generate_nostr_keypair,
+    nostr_helper_availability_from_config,
+    nostr_support_unavailable_message,
+    setup_nostr_account,
+    test_nostr_relays,
+)
 from .status import build_status_text, format_server_version, tor_upstream_lines
 from .tor import TorUpstreamManager, apply_tor_upstream, env_tor_upstream_enabled
 from .watcher import Watcher, get_passphrase_from_env_or_prompt
 from .healthcheck import main as healthcheck_main
 
 
-INIT_SECTIONS = ["full", "electrum", "ntfy", "wallet", "app", "mempool", "tor", "conversation"]
+INIT_SECTIONS = [
+    "full",
+    "electrum",
+    "ntfy",
+    "nostr",
+    "wallet",
+    "app",
+    "mempool",
+    "tor",
+    "conversation",
+]
 SATS_PER_BTC = Decimal("100000000")
 BTC_QUANTUM = Decimal("0.00000001")
+NOTIFICATION_PROVIDER_CHOICES = ("all", "ntfy", "nostr")
+NOTIFICATION_PROVIDER_TOGGLE_CHOICES = ("ntfy", "nostr")
 
 def _prompt(label: str, default: str | None = None, *, display_default: str | None = None) -> str:
     # display_default lets us show a friendly hint (e.g. "not yet set") while
@@ -222,6 +260,555 @@ def _encrypted_config_value(value: str, passphrase: str) -> tuple[str, dict[str,
     return encrypted_value, metadata_to_config(metadata)
 
 
+def _editable_notification_provider_config(config: dict, provider_name: str) -> dict:
+    notifications = config.get("notifications")
+    if not isinstance(notifications, dict):
+        notifications = {}
+        config["notifications"] = notifications
+
+    providers = notifications.get("providers")
+    if not isinstance(providers, dict):
+        providers = {}
+        notifications["providers"] = providers
+
+    provider_config = notification_provider_config(config, provider_name)
+    providers[provider_name] = provider_config
+    return provider_config
+
+
+def _set_notification_provider_enabled(
+    config: dict,
+    provider_name: str,
+    *,
+    enabled: bool,
+) -> bool:
+    if provider_name not in NOTIFICATION_PROVIDER_TOGGLE_CHOICES:
+        raise ValueError(f"Unsupported notification provider: {provider_name}")
+
+    provider_config = _editable_notification_provider_config(config, provider_name)
+    was_enabled = bool(provider_config.get("enabled", False))
+    provider_config["enabled"] = enabled
+    return was_enabled
+
+
+def _enabled_notification_provider_names(config: dict) -> list[str]:
+    enabled_providers = []
+    for provider_name in NOTIFICATION_PROVIDER_TOGGLE_CHOICES:
+        provider_config = notification_provider_config(config, provider_name)
+        if bool(provider_config.get("enabled", False)):
+            enabled_providers.append(provider_name)
+    return enabled_providers
+
+
+def _print_notification_provider_toggle_summary(
+    config_path: Path,
+    config: dict,
+    provider_name: str,
+    *,
+    enabled: bool,
+    was_enabled: bool,
+) -> None:
+    state = "enabled" if enabled else "disabled"
+    previous_state = "enabled" if was_enabled else "disabled"
+    if was_enabled == enabled:
+        print(f"{provider_name} notification provider was already {state}.")
+    else:
+        print(
+            f"{provider_name} notification provider changed "
+            f"from {previous_state} to {state}."
+        )
+    print(f"Updated {config_path}")
+
+    enabled_providers = _enabled_notification_provider_names(config)
+    print(
+        "Enabled notification providers: "
+        f"{', '.join(enabled_providers) if enabled_providers else 'none'}"
+    )
+
+    if enabled and provider_name == "nostr":
+        nostr_config = notification_provider_config(config, "nostr")
+        sender = nostr_config.get("sender") or {}
+        encrypted_nsec = ""
+        if isinstance(sender, dict):
+            encrypted_nsec = str(sender.get("encrypted_nsec") or "").strip()
+
+        missing = []
+        if not encrypted_nsec:
+            missing.append("encrypted sender nsec")
+        if not list(nostr_config.get("recipients") or []):
+            missing.append("recipient npub")
+        if not list(nostr_config.get("relays") or []):
+            missing.append("relay")
+        if missing:
+            print()
+            print(
+                "Nostr is enabled, but it is not fully configured yet: "
+                f"missing {', '.join(missing)}."
+            )
+            print("Run `wwg nostr setup` to generate a sender key and configure DMs.")
+
+    print()
+    print("Restart WWG so the running watcher picks up the config change:")
+    print("  docker compose restart wallet-watchguard")
+    print("If you run WWG locally, stop and start your `wwg run` process instead.")
+
+
+def _split_csv_values(raw: str) -> list[str]:
+    values = []
+    for item in raw.replace("\n", ",").split(","):
+        value = item.strip()
+        if value:
+            values.append(value)
+    return values
+
+
+def _dedupe_preserving_order(values: list[str]) -> list[str]:
+    seen = set()
+    deduped = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
+
+
+def _parse_relay_list(raw: str) -> list[str]:
+    relays = _dedupe_preserving_order(_split_csv_values(raw))
+    if not relays:
+        raise ValueError("At least one Nostr relay is required")
+
+    for relay in relays:
+        if not relay.startswith(("wss://", "ws://")):
+            raise ValueError(f"Nostr relay must start with wss:// or ws://: {relay}")
+
+    return relays
+
+
+def _prompt_nostr_relays(existing_relays: list[str]) -> list[str]:
+    default_relays = ",".join(existing_relays or ["wss://nos.lol"])
+    while True:
+        raw = _prompt("Nostr relay URLs, comma-separated", default_relays)
+        try:
+            return _parse_relay_list(raw)
+        except ValueError as exc:
+            print(exc)
+
+
+def _recipient_npub(recipient: object) -> str:
+    if isinstance(recipient, str):
+        return recipient.strip()
+    if isinstance(recipient, dict):
+        return str(recipient.get("npub") or "").strip()
+    return ""
+
+
+def _recipient_name(recipient: object) -> str:
+    if isinstance(recipient, dict):
+        return str(recipient.get("name") or "").strip()
+    return ""
+
+
+def _prompt_nostr_recipients(existing_recipients: list[object]) -> list[object]:
+    existing_npubs = [
+        npub
+        for npub in (_recipient_npub(recipient) for recipient in existing_recipients)
+        if npub
+    ]
+    default_npubs = ",".join(existing_npubs)
+
+    while True:
+        raw_recipients = _prompt(
+            "Recipient npub(s) for encrypted Nostr DMs, comma-separated",
+            default_npubs,
+        ).strip()
+        recipient_npubs = [
+            value.strip() for value in raw_recipients.split(",") if value.strip()
+        ]
+        invalid_npubs = [
+            npub for npub in recipient_npubs if not npub.startswith("npub1")
+        ]
+        if recipient_npubs and not invalid_npubs:
+            break
+        if not recipient_npubs:
+            print("At least one recipient npub is required.")
+        else:
+            print(f"Recipient npub must start with npub1: {invalid_npubs[0]}")
+
+    if len(recipient_npubs) > 1:
+        return recipient_npubs
+
+    existing_name = _recipient_name(existing_recipients[0]) if existing_recipients else ""
+    recipient_name = _prompt("Recipient name, blank for none", existing_name).strip()
+    if recipient_name:
+        return [{"name": recipient_name, "npub": recipient_npubs[0]}]
+    return recipient_npubs
+
+
+def _encrypt_nostr_sender_nsec(nsec: str, passphrase: str) -> tuple[str, dict[str, object]]:
+    if not nsec.startswith("nsec1"):
+        raise ValueError("Generated Nostr secret key was not an nsec")
+    return _encrypted_config_value(nsec, passphrase)
+
+
+async def _send_nostr_setup_test_dm_async(
+    *,
+    helper_path: str,
+    sender_nsec: str,
+    nostr_config: dict,
+) -> None:
+    sender = nostr_config.get("sender") or {}
+    provider = NostrNotificationProvider(
+        helper_path=helper_path,
+        sender_nsec=sender_nsec,
+        recipients=list(nostr_config.get("recipients") or []),
+        relays=list(nostr_config.get("relays") or []),
+        min_successful_relays=int(nostr_config.get("min_successful_relays", 1)),
+        send_copy_to_self=bool(nostr_config.get("send_copy_to_self", True)),
+        connect_timeout_seconds=int(nostr_config.get("connect_timeout_seconds", 10)),
+        process_timeout_seconds=int(nostr_config.get("timeout_seconds", 30)),
+        configured_sender_npub=(
+            str(sender.get("npub") or "") if isinstance(sender, dict) else ""
+        ),
+    )
+    result = await provider.send(
+        NotificationMessage(
+            title="Bitcoin Wallet Watchguard - ⚡ xanny@cake.cash",
+            markdown_body="Wallet Watchguard Nostr encrypted DM test message.",
+            plain_body="Wallet Watchguard Nostr encrypted DM test message.",
+        )
+    )
+    if not result.ok:
+        raise RuntimeError(result.detail or "Nostr helper reported delivery failure")
+    print(f"Nostr test DM sent: {result.detail}")
+
+
+def _maybe_send_nostr_setup_test(
+    *,
+    helper_path: str,
+    sender_nsec: str,
+    nostr_config: dict,
+    prompt: bool,
+    default: bool = True,
+) -> None:
+    send_test = default
+    if prompt:
+        print()
+        send_test = _prompt_bool("Send a Nostr test DM now", default)
+
+    if not send_test:
+        print("Skipping Nostr test DM.")
+        return
+
+    try:
+        asyncio.run(
+            _send_nostr_setup_test_dm_async(
+                helper_path=helper_path,
+                sender_nsec=sender_nsec,
+                nostr_config=nostr_config,
+            )
+        )
+    except Exception as exc:
+        print(
+            f"warning: Nostr provider was configured, but the test DM failed: {exc}",
+            file=sys.stderr,
+        )
+
+
+def _notification_provider_label(provider: str) -> str:
+    labels = {
+        "all": "all enabled notification providers",
+        "ntfy": "ntfy",
+        "nostr": "Nostr encrypted DM",
+    }
+    return labels.get(provider, provider)
+
+
+def _config_for_notification_provider_selection(config: dict, provider: str) -> dict:
+    if provider == "all":
+        return config
+
+    if provider not in {"ntfy", "nostr"}:
+        raise ValueError(f"Unsupported notification provider: {provider}")
+
+    selected_config = copy.deepcopy(config)
+    for provider_name in ("ntfy", "nostr"):
+        provider_config = _editable_notification_provider_config(
+            selected_config,
+            provider_name,
+        )
+        provider_config["enabled"] = provider_name == provider
+
+    return selected_config
+
+
+def _print_notification_results(results: list[NotificationResult]) -> None:
+    if not results:
+        print("No notification providers were selected or enabled.")
+        return
+
+    for result in results:
+        state = "sent" if result.ok else "failed"
+        detail = f": {result.detail}" if result.detail else ""
+        print(f"{result.provider}: {state}{detail}")
+
+
+async def _cmd_test_notifications_async(
+    config: dict,
+    passphrase: str,
+    *,
+    provider: str,
+) -> list[NotificationResult]:
+    selected_config = _config_for_notification_provider_selection(config, provider)
+    manager, _decrypted_ntfy_config = build_notification_manager(
+        selected_config,
+        passphrase,
+    )
+    message = format_test_notification(_notification_provider_label(provider))
+    return await manager.send(message, raise_on_failure=False)
+
+
+def _relay_failure_text(failure: object) -> str:
+    if isinstance(failure, dict):
+        url = str(failure.get("url") or "relay")
+        error = str(failure.get("error") or "failed")
+        return f"{url}: {error}"
+    return str(failure)
+
+
+def _print_nostr_relay_test_result(result: dict[str, object]) -> None:
+    accepted_relays = result.get("accepted_relays") or []
+    failed_relays = result.get("failed_relays") or []
+
+    if isinstance(accepted_relays, list):
+        print(f"Accepted relays: {len(accepted_relays)}")
+        for relay in accepted_relays:
+            print(f"  ✓ {relay}")
+
+    if isinstance(failed_relays, list):
+        print(f"Failed relays: {len(failed_relays)}")
+        for failure in failed_relays:
+            print(f"  ✗ {_relay_failure_text(failure)}")
+
+
+def _publish_new_nostr_sender_setup(
+    *,
+    helper_path: str,
+    sender_nsec: str,
+    nostr_config: dict,
+) -> None:
+    try:
+        result = setup_nostr_account(
+            helper_path,
+            sender_nsec=sender_nsec,
+            recipients=list(nostr_config.get("recipients") or []),
+            relays=list(nostr_config.get("relays") or []),
+            profile_name="WWG Notifications",
+            min_successful_relays=int(nostr_config.get("min_successful_relays", 1)),
+            connect_timeout_seconds=int(nostr_config.get("connect_timeout_seconds", 10)),
+            timeout_seconds=int(nostr_config.get("timeout_seconds", 30)),
+        )
+    except Exception as exc:
+        print(
+            f"warning: WWG Nostr sender profile/follow setup failed: {exc}",
+            file=sys.stderr,
+        )
+        return
+
+    followed_recipients = result.get("followed_recipients") or []
+    followed_count = len(followed_recipients) if isinstance(followed_recipients, list) else 0
+    if bool(result.get("ok", False)):
+        print(
+            "Published WWG Nostr sender metadata and followed "
+            f"{followed_count} recipient npub(s)."
+        )
+        return
+
+    print(
+        "warning: WWG Nostr sender profile/follow setup completed with relay failures",
+        file=sys.stderr,
+    )
+    _print_nostr_publish_result("Metadata", result.get("metadata"))
+    _print_nostr_publish_result("Contact list", result.get("contact_list"))
+
+
+def _print_nostr_publish_result(label: str, result: object) -> None:
+    if not isinstance(result, dict):
+        return
+    accepted_relays = result.get("accepted_relays") or []
+    failed_relays = result.get("failed_relays") or []
+    accepted_count = len(accepted_relays) if isinstance(accepted_relays, list) else 0
+    failed_count = len(failed_relays) if isinstance(failed_relays, list) else 0
+    print(
+        f"  {label}: accepted_relays={accepted_count} failed_relays={failed_count}",
+        file=sys.stderr,
+    )
+    if isinstance(failed_relays, list):
+        for failure in failed_relays:
+            print(f"    ✗ {_relay_failure_text(failure)}", file=sys.stderr)
+
+
+def _configure_nostr_provider(
+    config: dict,
+    passphrase: str,
+    *,
+    force_generate: bool = False,
+    always_generate: bool = False,
+    prompt_for_test: bool = True,
+    send_test_default: bool = True,
+) -> dict:
+    availability = ensure_nostr_helper_available(config)
+    helper_path = availability.resolved_path or availability.configured_path
+    nostr_provider = _editable_notification_provider_config(config, "nostr")
+    nostr_provider["helper_path"] = str(
+        nostr_provider.get("helper_path") or availability.configured_path
+    )
+
+    sender = nostr_provider.get("sender") or {}
+    if not isinstance(sender, dict):
+        sender = {}
+
+    encrypted_nsec = str(sender.get("encrypted_nsec") or "").strip()
+    sender_nsec_for_test = ""
+
+    if encrypted_nsec and always_generate and not force_generate:
+        raise ValueError(
+            "Nostr sender key already exists. Re-run with --force to replace it."
+        )
+
+    should_generate = not encrypted_nsec or always_generate or force_generate
+    if encrypted_nsec and not always_generate and not force_generate:
+        existing_npub = str(sender.get("npub") or "").strip() or "not configured"
+        print()
+        print(f"Existing WWG Nostr sender npub: {existing_npub}")
+        print(
+            "Keeping the existing sender key. "
+            "Use `wwg nostr generate-key --force` to replace it."
+        )
+
+    if should_generate:
+        print()
+        print("Generating a dedicated WWG Nostr sender key with wwg-nostr...")
+        keypair = generate_nostr_keypair(helper_path)
+        encrypted_nsec, nsec_encryption = _encrypt_nostr_sender_nsec(
+            keypair.nsec,
+            passphrase,
+        )
+        nostr_provider["sender"] = {
+            "npub": keypair.npub,
+            "encrypted_nsec": encrypted_nsec,
+            "nsec_encryption": nsec_encryption,
+        }
+        sender_nsec_for_test = keypair.nsec
+        print(f"WWG sender npub: {keypair.npub}")
+    else:
+        nostr_provider["sender"] = sender
+        sender_nsec_for_test = decrypt_nostr_sender_nsec(nostr_provider, passphrase)
+
+    print()
+    print("Nostr recipient and relay settings")
+    nostr_provider["recipients"] = _prompt_nostr_recipients(
+        list(nostr_provider.get("recipients") or [])
+    )
+    nostr_provider["relays"] = _prompt_nostr_relays(
+        list(nostr_provider.get("relays") or [])
+    )
+    nostr_provider["min_successful_relays"] = int(
+        _prompt(
+            "Minimum successful relays required",
+            str(nostr_provider.get("min_successful_relays", 1)),
+        )
+    )
+    min_successful_relays = int(nostr_provider["min_successful_relays"])
+    if min_successful_relays < 1:
+        raise ValueError("Minimum successful relays must be at least 1")
+    if min_successful_relays > len(nostr_provider["relays"]):
+        raise ValueError(
+            "Minimum successful relays cannot be greater than the configured relay count"
+        )
+
+    if should_generate:
+        _publish_new_nostr_sender_setup(
+            helper_path=helper_path,
+            sender_nsec=sender_nsec_for_test,
+            nostr_config=nostr_provider,
+        )
+
+    nostr_provider["send_copy_to_self"] = _prompt_bool(
+        "Send a copy of each Nostr alert to the WWG sender npub",
+        bool(nostr_provider.get("send_copy_to_self", True)),
+    )
+    nostr_provider["enabled"] = _prompt_bool("Enable Nostr notifications", True)
+
+    if nostr_provider["enabled"]:
+        _maybe_send_nostr_setup_test(
+            helper_path=helper_path,
+            sender_nsec=sender_nsec_for_test,
+            nostr_config=nostr_provider,
+            prompt=prompt_for_test,
+            default=send_test_default,
+        )
+    else:
+        print("Nostr provider is configured but left disabled.")
+
+    return config
+
+
+
+def _prompt_notification_provider_setup_choice() -> str:
+    print()
+    print("Notification provider setup")
+    aliases = {
+        "1": "ntfy",
+        "n": "ntfy",
+        "ntfy": "ntfy",
+        "2": "nostr",
+        "nostr": "nostr",
+        "3": "both",
+        "all": "both",
+        "both": "both",
+    }
+
+    while True:
+        value = _prompt(
+            "Do you want to configure Ntfy, Nostr, or both?",
+            "Ntfy",
+        ).strip().lower()
+        if value in aliases:
+            return aliases[value]
+        print("Please choose Ntfy, Nostr, or both.")
+
+
+def _prompt_notification_provider_config(
+    config: dict,
+    passphrase: str,
+) -> dict:
+    provider_choice = _prompt_notification_provider_setup_choice()
+    configure_ntfy = provider_choice in {"ntfy", "both"}
+    configure_nostr = provider_choice in {"nostr", "both"}
+
+    _set_notification_provider_enabled(config, "ntfy", enabled=configure_ntfy)
+    if not configure_nostr:
+        _set_notification_provider_enabled(config, "nostr", enabled=False)
+
+    if configure_ntfy:
+        config["ntfy"] = _prompt_ntfy_config(passphrase, config.get("ntfy"))
+    else:
+        print()
+        print("Skipping ntfy notification setup for now.")
+        print("You can configure it later with:")
+        print("  wwg init --add ntfy")
+
+    if configure_nostr:
+        config = _configure_nostr_provider(config, passphrase)
+    else:
+        print()
+        print("Skipping Nostr encrypted DM notification setup for now.")
+        print("You can configure it later with:")
+        print("  wwg init --add nostr")
+
+    return config
+
 def _print_missing_config_help(config_path: Path) -> None:
     print(file=sys.stderr)
     print(f"Config file not found: {config_path}", file=sys.stderr)
@@ -249,6 +836,10 @@ def _config_has_encrypted_values(config: dict) -> bool:
 
     conversation_auth = (config.get("conversation") or {}).get("auth") or {}
     if conversation_auth.get("encrypted_token") or conversation_auth.get("encrypted_password"):
+        return True
+
+    nostr_sender = notification_provider_config(config, "nostr").get("sender") or {}
+    if isinstance(nostr_sender, dict) and nostr_sender.get("encrypted_nsec"):
         return True
 
     for wallet in config.get("wallets") or []:
@@ -292,6 +883,15 @@ def _validate_existing_passphrase(config: dict, passphrase: str) -> None:
         except Exception as exc:
             raise ValueError("Passphrase did not decrypt existing ntfy credentials. No changes were made.") from exc
 
+    nostr_provider = notification_provider_config(config, "nostr")
+    nostr_sender = nostr_provider.get("sender") or {}
+    if isinstance(nostr_sender, dict) and nostr_sender.get("encrypted_nsec"):
+        checked_any = True
+        try:
+            decrypt_nostr_sender_nsec(nostr_provider, passphrase)
+        except Exception as exc:
+            raise ValueError("Passphrase did not decrypt the Nostr sender key. No changes were made.") from exc
+
     if not checked_any and _config_has_encrypted_values(config):
         print(
             "warning: existing encrypted values were found, but this command could not validate them before continuing.",
@@ -315,7 +915,7 @@ def _get_encryption_passphrase(
     else:
         print()
         print("Set the passphrase used to encrypt sensitive values in config.yaml.")
-        print("This passphrase encrypts your xpub and ntfy credentials at rest.")
+        print("This passphrase encrypts your xpub, ntfy credentials, and Nostr sender key at rest.")
         print("You will need it whenever Wallet Watchguard starts.")
         passphrase = prompt_new_passphrase()
 
@@ -899,7 +1499,7 @@ def _apply_full_setup(config: dict, args: argparse.Namespace, *, existing_secret
     passphrase = _get_encryption_passphrase(args, existing_secret=existing_secret, config=config)
     config["app"] = _prompt_app_config(config.get("app"))
     config["electrum"] = _prompt_electrum_config(config.get("electrum"))
-    config["ntfy"] = _prompt_ntfy_config(passphrase, config.get("ntfy"))
+    config = _prompt_notification_provider_config(config, passphrase)
     config["mempool"] = _prompt_mempool_config(config.get("mempool"))
     config["tor"] = _prompt_tor_config(config.get("tor"))
     config["conversation"] = _prompt_conversation_config(passphrase, config.get("conversation"), config.get("ntfy"))
@@ -937,6 +1537,15 @@ def _apply_section(config: dict, section: str, args: argparse.Namespace) -> dict
         config["ntfy"] = _prompt_ntfy_config(passphrase, config.get("ntfy"))
         return config
 
+    if section == "nostr":
+        ensure_nostr_helper_available(config)
+        passphrase = _get_encryption_passphrase(
+            args,
+            existing_secret=_config_has_encrypted_values(config),
+            config=config,
+        )
+        return _configure_nostr_provider(config, passphrase)
+
     if section == "wallet":
         passphrase = _get_encryption_passphrase(args, existing_secret=_config_has_encrypted_values(config), config=config)
         config.setdefault("wallets", [])
@@ -967,14 +1576,15 @@ def _choose_section_to_add() -> str:
         "What would you like to configure?",
         {
             "1": "ntfy credentials/server/topic",
-            "2": "Electrum/Fulcrum node",
-            "3": "Add wallet xpub",
-            "4": "Application settings",
-            "5": "Optional Mempool API enrichment",
-            "6": "Tor upstream for onion Electrum/Fulcrum nodes",
-            "7": "Conversation Mode",
-            "8": "Full setup wizard",
-            "9": "Cancel",
+            "2": "Nostr encrypted DM notifications",
+            "3": "Electrum/Fulcrum node",
+            "4": "Add wallet xpub",
+            "5": "Application settings",
+            "6": "Optional Mempool API enrichment",
+            "7": "Tor upstream for onion Electrum/Fulcrum nodes",
+            "8": "Conversation Mode",
+            "9": "Full setup wizard",
+            "10": "Cancel",
         },
         default="1",
     )
@@ -983,14 +1593,15 @@ def _choose_section_to_add() -> str:
 def _section_from_menu_choice(choice: str) -> str | None:
     return {
         "1": "ntfy",
-        "2": "electrum",
-        "3": "wallet",
-        "4": "app",
-        "5": "mempool",
-        "6": "tor",
-        "7": "conversation",
-        "8": "full",
-        "9": None,
+        "2": "nostr",
+        "3": "electrum",
+        "4": "wallet",
+        "5": "app",
+        "6": "mempool",
+        "7": "tor",
+        "8": "conversation",
+        "9": "full",
+        "10": None,
     }[choice]
 
 
@@ -1021,6 +1632,7 @@ def _print_save_summary(config_path: Path, config: dict) -> None:
     print("Useful checks:")
     print(f"  wwg status")
     print(f"  wwg test-ntfy")
+    print(f"  wwg nostr status")
     print(f"  wwg test-tor")
     print(f"  wwg addresses --limit 20")
 
@@ -1083,7 +1695,7 @@ def _add_tor_upstream_arg(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _load_config_for_persistent_tor_edit(config_path: Path) -> dict:
+def _load_config_for_persistent_edit(config_path: Path) -> dict:
     if not config_path.exists():
         _print_missing_config_help(config_path)
         raise FileNotFoundError(f"Config file not found: {config_path}")
@@ -1092,6 +1704,10 @@ def _load_config_for_persistent_tor_edit(config_path: Path) -> dict:
         raise IsADirectoryError(f"Config path is a directory, not a file: {config_path}")
 
     return load_config_for_edit(config_path)
+
+
+def _load_config_for_persistent_tor_edit(config_path: Path) -> dict:
+    return _load_config_for_persistent_edit(config_path)
 
 
 def _set_persistent_tor_enabled(config: dict, *, enabled: bool) -> dict:
@@ -1135,17 +1751,13 @@ def _print_tor_next_steps(config_path: Path, *, enabled: bool) -> None:
 
 
 async def _cmd_test_ntfy_async(config: dict, passphrase: str) -> None:
+    message = format_test_notification()
     notifier = NtfyNotifier(decrypt_ntfy_config(config["ntfy"], passphrase))
-    message = (
-        "Bitcoin Wallet Watchguard successfully published this test notification via ntfy.\n\n"
-        "This is free and open source software made by a fellow bitcoiner.\n"
-        "If you appreciate it, my Lightning address is xanny@cake.cash ⚡"
-    )
     await notifier.send(
-        "⚡ Wallet Watchguard: Test Alert",
-        message,
-        priority="default",
-        tags="white_check_mark,bitcoin",
+        message.title,
+        message.markdown_body,
+        priority=message.priority,
+        tags=message.tags,
     )
 
 
@@ -1644,7 +2256,13 @@ async def _cmd_live_debug_async(config: dict, passphrase: str, args: argparse.Na
     print(f"Path: {result['path']}")
     print(f"Address: {result['address']}")
     print(f"Processed new/changed history items: {result['processed_items']}")
-    print("If ntfy credentials were valid and notification settings allowed this transaction status, a normal live notification was sent.")
+    provider = getattr(args, "provider", "all")
+    provider_label = _notification_provider_label(provider)
+    print(
+        "If "
+        f"{provider_label} was configured and notification settings allowed this "
+        "transaction status, a normal live notification was sent."
+    )
 
 
 async def _cmd_addresses_async(config: dict, passphrase: str, args: argparse.Namespace) -> None:
@@ -2056,6 +2674,21 @@ def cmd_test_ntfy(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_test_notifications(args: argparse.Namespace) -> int:
+    provider = str(getattr(args, "provider", "all"))
+    config = load_config(args.config)
+    passphrase = args.passphrase or get_passphrase_from_env_or_prompt()
+    results = asyncio.run(
+        _cmd_test_notifications_async(
+            config,
+            passphrase,
+            provider=provider,
+        )
+    )
+    _print_notification_results(results)
+    return 0 if results and all(result.ok for result in results) else 1
+
+
 def cmd_addresses(args: argparse.Namespace) -> int:
     config = _runtime_config(load_config(args.config), args)
     passphrase = args.passphrase or get_passphrase_from_env_or_prompt()
@@ -2256,6 +2889,10 @@ def cmd_autobalance(args: argparse.Namespace) -> int:
 
 def cmd_live_debug(args: argparse.Namespace) -> int:
     config = _runtime_config(load_config(args.config), args)
+    config = _config_for_notification_provider_selection(
+        config,
+        getattr(args, "provider", "all"),
+    )
     passphrase = args.passphrase or get_passphrase_from_env_or_prompt()
     asyncio.run(_cmd_live_debug_async(config, passphrase, args))
     return 0
@@ -2332,6 +2969,147 @@ def cmd_tor_disable(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_notification_provider_toggle(args: argparse.Namespace) -> int:
+    config_path = Path(args.config)
+    config = _load_config_for_persistent_edit(config_path)
+    provider_name = str(args.provider)
+    enabled = bool(args.provider_enabled)
+    was_enabled = _set_notification_provider_enabled(
+        config,
+        provider_name,
+        enabled=enabled,
+    )
+    save_config(config_path, config)
+
+    _print_notification_provider_toggle_summary(
+        config_path,
+        config,
+        provider_name,
+        enabled=enabled,
+        was_enabled=was_enabled,
+    )
+    return 0
+
+
+def cmd_nostr_generate_key(args: argparse.Namespace) -> int:
+    config_path = Path(args.config)
+    config_exists = config_path.exists()
+    config = load_config_for_edit(config_path)
+
+    if not config_exists:
+        print()
+        print(
+            f"No existing config found at {config_path}; "
+            "creating one with Nostr configured."
+        )
+
+    ensure_nostr_helper_available(config)
+    nostr_sender = notification_provider_config(config, "nostr").get("sender") or {}
+    if (
+        isinstance(nostr_sender, dict)
+        and nostr_sender.get("encrypted_nsec")
+        and not bool(args.force)
+    ):
+        raise ValueError(
+            "Nostr sender key already exists. Re-run with --force to replace it."
+        )
+
+    passphrase = _get_encryption_passphrase(
+        args,
+        existing_secret=_config_has_encrypted_values(config),
+        config=config,
+    )
+    config = _configure_nostr_provider(
+        config,
+        passphrase,
+        force_generate=bool(args.force),
+        always_generate=True,
+        prompt_for_test=not bool(args.no_test),
+        send_test_default=not bool(args.no_test),
+    )
+    save_config(config_path, config)
+    _print_save_summary(config_path, config)
+    return 0
+
+
+def cmd_nostr_test_dm(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    passphrase = args.passphrase or get_passphrase_from_env_or_prompt()
+    results = asyncio.run(
+        _cmd_test_notifications_async(
+            config,
+            passphrase,
+            provider="nostr",
+        )
+    )
+    _print_notification_results(results)
+    return 0 if results and all(result.ok for result in results) else 1
+
+
+def cmd_nostr_test_relays(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    nostr_config = notification_provider_config(config, "nostr")
+    availability = ensure_nostr_helper_available(config)
+    helper_path = availability.resolved_path or availability.configured_path
+
+    relays = list(nostr_config.get("relays") or [])
+    if not relays:
+        raise ValueError("No Nostr relays are configured")
+
+    timeout_seconds = int(getattr(args, "timeout", None) or nostr_config.get("timeout_seconds", 30))
+    connect_timeout_seconds = int(
+        getattr(args, "connect_timeout", None)
+        or nostr_config.get("connect_timeout_seconds", 10)
+    )
+    result = test_nostr_relays(
+        helper_path,
+        relays,
+        connect_timeout_seconds=connect_timeout_seconds,
+        timeout_seconds=timeout_seconds,
+    )
+    _print_nostr_relay_test_result(result)
+    return 0 if bool(result.get("ok", False)) else 1
+
+
+def cmd_nostr_status(args: argparse.Namespace) -> int:
+    config_path = Path(args.config)
+
+    if not config_path.exists():
+        _print_missing_config_help(config_path)
+        return 2
+
+    if config_path.is_dir():
+        print(file=sys.stderr)
+        print(f"Config path is a directory, not a file: {config_path}", file=sys.stderr)
+        print(file=sys.stderr)
+        return 2
+
+    config = load_config_for_edit(config_path)
+    nostr_config = notification_provider_config(config, "nostr")
+    enabled = bool(nostr_config.get("enabled", False))
+    sender = nostr_config.get("sender") or {}
+    sender_npub = str(sender.get("npub") or "").strip() if isinstance(sender, dict) else ""
+    availability = nostr_helper_availability_from_config(config)
+
+    print("Nostr notifications:", "enabled" if enabled else "disabled")
+    print(f"WWG sender npub: {sender_npub or 'not configured'}")
+    print(f"Configured helper: {availability.configured_path}")
+    print(f"Helper: {availability.status_text}")
+
+    if availability.available:
+        print()
+        print("The Nostr helper is available for this build.")
+        if enabled:
+            print("Encrypted DM delivery is enabled and will use the configured helper at runtime.")
+        else:
+            print("Encrypted DM delivery is ready once the Nostr provider is enabled and configured.")
+        return 0
+
+    print()
+    print(nostr_support_unavailable_message(availability))
+    return 2 if enabled else 0
+
+
 def cmd_tor_status(args: argparse.Namespace) -> int:
     config_path = Path(args.config)
     config = _load_config_for_persistent_tor_edit(config_path)
@@ -2355,7 +3133,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--add",
         choices=INIT_SECTIONS,
         default=None,
-        help="Jump directly to a setup section: full, electrum, ntfy, wallet, app, mempool, tor, or Conversation Mode",
+        help=(
+            "Jump directly to a setup section: full, electrum, ntfy, nostr, "
+            "wallet, app, mempool, tor, or Conversation Mode"
+        ),
     )
     p_init.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt")
     p_init.set_defaults(func=cmd_init)
@@ -2364,6 +3145,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_add_wallet.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     p_add_wallet.add_argument("--passphrase", default=None, help="Encryption passphrase; otherwise prompt")
     p_add_wallet.set_defaults(func=cmd_init, reset=False, add="wallet")
+
+    p_enable = sub.add_parser("enable", help="Enable a notification provider in config.yaml")
+    p_enable.add_argument("provider", choices=NOTIFICATION_PROVIDER_TOGGLE_CHOICES)
+    p_enable.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_enable.set_defaults(
+        func=cmd_notification_provider_toggle,
+        provider_enabled=True,
+    )
+
+    p_disable = sub.add_parser("disable", help="Disable a notification provider in config.yaml")
+    p_disable.add_argument("provider", choices=NOTIFICATION_PROVIDER_TOGGLE_CHOICES)
+    p_disable.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_disable.set_defaults(
+        func=cmd_notification_provider_toggle,
+        provider_enabled=False,
+    )
 
     p_enc = sub.add_parser("encrypt-xpub", help="Encrypt an xpub for storage in YAML")
     p_enc.add_argument("--xpub", required=True)
@@ -2397,6 +3194,24 @@ def build_parser() -> argparse.ArgumentParser:
     _add_tor_upstream_arg(p_test)
     p_test.set_defaults(func=cmd_test_ntfy)
 
+    p_test_notifications = sub.add_parser(
+        "test-notifications",
+        help="Send a test notification through the configured provider pipeline",
+    )
+    p_test_notifications.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_test_notifications.add_argument(
+        "--passphrase",
+        default=None,
+        help="Encryption passphrase; otherwise prompt/env",
+    )
+    p_test_notifications.add_argument(
+        "--provider",
+        choices=NOTIFICATION_PROVIDER_CHOICES,
+        default="all",
+        help="Notification provider to test",
+    )
+    p_test_notifications.set_defaults(func=cmd_test_notifications)
+
 
     p_live_debug = sub.add_parser(
         "live-debug",
@@ -2407,6 +3222,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_live_debug.add_argument("--wallet", default=None, help="Choose wallet by exact name or unique partial name")
     p_live_debug.add_argument("--wallet-index", type=int, default=None, help="Choose wallet by its 1-based index in config")
     p_live_debug.add_argument("--limit", type=int, default=None, help="Addresses per branch to scan; defaults to wallet/app lookahead")
+    p_live_debug.add_argument(
+        "--provider",
+        choices=NOTIFICATION_PROVIDER_CHOICES,
+        default="all",
+        help="Notification provider to use for the replay",
+    )
     _add_tor_upstream_arg(p_live_debug)
     p_live_debug.set_defaults(func=cmd_live_debug)
 
@@ -2605,6 +3426,74 @@ def build_parser() -> argparse.ArgumentParser:
     p_test_tor.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     _add_tor_upstream_arg(p_test_tor)
     p_test_tor.set_defaults(func=cmd_test_tor)
+
+    p_nostr = sub.add_parser("nostr", help="Manage Nostr encrypted DM notifications")
+    nostr_sub = p_nostr.add_subparsers(dest="nostr_command", required=True)
+
+    p_nostr_generate = nostr_sub.add_parser(
+        "generate-key",
+        aliases=["setup"],
+        help=(
+            "Generate and encrypt a WWG Nostr sender key, "
+            "then configure recipients and relays"
+        ),
+    )
+    p_nostr_generate.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_nostr_generate.add_argument(
+        "--passphrase",
+        default=None,
+        help="Encryption passphrase; otherwise prompt",
+    )
+    p_nostr_generate.add_argument(
+        "--force",
+        action="store_true",
+        help="Replace an existing encrypted WWG Nostr sender key",
+    )
+    p_nostr_generate.add_argument(
+        "--no-test",
+        action="store_true",
+        help="Do not offer to send a Nostr test DM during setup",
+    )
+    p_nostr_generate.set_defaults(func=cmd_nostr_generate_key)
+
+    p_nostr_test_dm = nostr_sub.add_parser(
+        "test-dm",
+        help="Send a Nostr encrypted DM test notification",
+    )
+    p_nostr_test_dm.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_nostr_test_dm.add_argument(
+        "--passphrase",
+        default=None,
+        help="Encryption passphrase; otherwise prompt/env",
+    )
+    p_nostr_test_dm.set_defaults(func=cmd_nostr_test_dm)
+
+    p_nostr_test_relays = nostr_sub.add_parser(
+        "test-relays",
+        help="Check configured Nostr relay connectivity",
+    )
+    p_nostr_test_relays.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_nostr_test_relays.add_argument(
+        "--connect-timeout",
+        type=int,
+        default=None,
+        help="Relay connection timeout in seconds; defaults to Nostr config",
+    )
+    p_nostr_test_relays.add_argument(
+        "--timeout",
+        type=int,
+        default=None,
+        help="Overall helper timeout in seconds; defaults to Nostr config",
+    )
+    p_nostr_test_relays.set_defaults(func=cmd_nostr_test_relays)
+
+    p_nostr_status = nostr_sub.add_parser(
+        "status",
+        aliases=["check"],
+        help="Show whether the wwg-nostr helper is available in this build",
+    )
+    p_nostr_status.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_nostr_status.set_defaults(func=cmd_nostr_status)
 
     p_tor = sub.add_parser("tor", help="Manage persistent internal Tor upstream settings")
     tor_sub = p_tor.add_subparsers(dest="tor_command", required=True)

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -13,9 +16,39 @@ from .derivation import derive_addresses
 from .electrum import ElectrumClient
 from .mempool import MempoolClient, mempool_fee_rate, mempool_tx_status
 from .models import DerivedAddress, WalletEvent
-from .ntfy import NtfyNotifier, decrypt_conversation_ntfy_config, decrypt_ntfy_config
+from .ntfy import NtfyNotifier, decrypt_conversation_ntfy_config
+from .notifications import (
+    build_notification_manager,
+    format_autobalance_notification,
+    format_wallet_activity_notification,
+)
 from .status import build_status_text, format_server_version
 from .tor import TorUpstreamManager
+
+
+logger = logging.getLogger("wwg")
+
+
+def configure_logging() -> None:
+    """Attach a timestamped stdout handler to the 'wwg' logger tree.
+
+    Idempotent, and it leaves the root logger alone so third-party library
+    logs aren't unleashed. Level is controlled by WWG_LOG_LEVEL (default INFO);
+    set it to DEBUG to see keepalive pings and per-message detail.
+    """
+    if logger.handlers:
+        return
+    level_name = os.environ.get("WWG_LOG_LEVEL", "INFO").upper()
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s: %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S%z",
+        )
+    )
+    logger.addHandler(handler)
+    logger.setLevel(getattr(logging, level_name, logging.INFO))
+    logger.propagate = False
 
 
 class Watcher:
@@ -30,8 +63,7 @@ class Watcher:
         self.db = Database(database_path)
         
         self.client = self._make_electrum_client()
-        self.decrypted_ntfy_config = decrypt_ntfy_config(config["ntfy"], passphrase)
-        self.notifier = NtfyNotifier(self.decrypted_ntfy_config)
+        self.notifications, self.decrypted_ntfy_config = build_notification_manager(config, passphrase)
         # Conversation Mode credentials are decrypted lazily, only when
         # Conversation Mode actually starts (see run()). A broken or partial
         # separate conversation credential must not stop the wallet watcher
@@ -53,15 +85,18 @@ class Watcher:
             tls_verify=electrum.get("tls_verify"),
             socks_proxy=electrum.get("socks_proxy"),
             timeout_seconds=int(electrum.get("timeout_seconds", 30)),
+            ping_interval_seconds=int(electrum.get("ping_interval_seconds", 120)),
         )
 
     async def run(self) -> None:
+        configure_logging()
         listener: asyncio.Task | None = None
         conversation_task: asyncio.Task | None = None
         autobalance_task: asyncio.Task | None = None
 
         await self.db.connect()
         try:
+            logger.info("Bitcoin Wallet Watchguard starting...")
             await self.tor_upstream.start()
             await self.client.connect()
             listener = asyncio.create_task(self.client.listen(self._handle_notification))
@@ -71,6 +106,13 @@ class Watcher:
 
             await self._derive_store_and_subscribe()
             self._subscriptions_ready.set()
+            logger.info(
+                "Subscribed to %d scripthash(es) across %d wallet(s)",
+                self._subscription_count, len(self.config["wallets"]),
+            )
+
+            if self.mempool.enabled:
+                await self.mempool.check_connectivity()
 
             if bool((self.config.get("conversation") or {}).get("enabled", False)):
                 try:
@@ -108,7 +150,7 @@ class Watcher:
                 autobalance_task = asyncio.create_task(self._run_autobalance_loop())
 
             self._print_startup_summary()
-            await asyncio.Event().wait()
+            await self._await_until_critical_exit(listener, autobalance_task)
         finally:
             if autobalance_task is not None:
                 autobalance_task.cancel()
@@ -129,6 +171,34 @@ class Watcher:
             await self.client.close()
             await self.db.close()
             await self.tor_upstream.stop()
+
+    async def _await_until_critical_exit(self, *tasks: asyncio.Task[Any] | None) -> None:
+        """Block until a long-lived background task exits, then surface why.
+
+        The listener and autobalance loop are meant to run for the whole life of
+        the daemon. The listener in particular raises and dies the moment the
+        Electrum server drops the connection. The old code then waited on an
+        Event forever, leaving the daemon up but no longer receiving live pushes
+        (autobalance kept working, masking the fault). Surfacing the exit here
+        unwinds to the finally block, tears the daemon down cleanly and lets the
+        process supervisor restart it; on restart the startup baseline now
+        catches up anything missed during the gap.
+        """
+        supervised = [task for task in tasks if task is not None]
+        if not supervised:
+            await asyncio.Event().wait()
+            return
+
+        done, _pending = await asyncio.wait(supervised, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            exc = task.exception()
+            if exc is not None:
+                # exc_info logs the full traceback so a periodic crash can be
+                # diagnosed from the container logs, not just its message.
+                logger.error("Critical background task exited; shutting down for restart", exc_info=exc)
+                raise exc
+        # A supervised loop returned without raising; none should stop on its own.
+        raise RuntimeError("A critical background task stopped unexpectedly; restarting daemon")
 
     def _derive_wallet_scripts(self, wallet: dict[str, Any], *, lookahead: int | None = None) -> list[DerivedAddress]:
         helper_path = self.config["app"].get("derivation_helper_path", "./wwg-derive")
@@ -174,8 +244,12 @@ class Watcher:
             scripts = self._derive_wallet_scripts(wallet)
             await self.db.upsert_watched_scripts(scripts)
 
+            # Baseline per wallet, not per script. A new tx lands on a fresh
+            # address whose own status/history is empty, so a per-script check
+            # mistook live activity for first-import history and stayed silent.
+            wallet_baselined = await self.db.wallet_has_baseline(wallet["name"])
+
             for script in scripts:
-                state_before = await self.db.get_scripthash_state(script.scripthash)
                 initial_status = await self.client.call("blockchain.scripthash.subscribe", [script.scripthash])
                 self._subscription_count += 1
 
@@ -183,13 +257,14 @@ class Watcher:
                 # The old watcher ignored it and only reacted to later push
                 # notifications, so transactions that happened while the daemon was
                 # offline were silently missed. Process the initial status too, but
-                # baseline first-run/imported history without spamming old alerts.
-                has_existing_baseline = bool(state_before["last_status"] is not None or state_before["history_count"])
+                # baseline a wallet's first run quietly so we don't spam old alerts.
                 await self._process_scripthash_update(
                     script.scripthash,
                     initial_status,
-                    notify_new_items=has_existing_baseline,
+                    notify_new_items=wallet_baselined,
                 )
+
+            await self.db.mark_wallet_baselined(wallet["name"])
 
     async def _test_tor_connectivity(self) -> None:
         try:
@@ -220,6 +295,7 @@ class Watcher:
         if not scripthash:
             return
 
+        logger.debug("Live push for scripthash %s…", str(scripthash)[:12])
         await self._process_scripthash_update(scripthash, status, notify_new_items=True)
 
     async def _process_scripthash_update(
@@ -255,6 +331,12 @@ class Watcher:
         history = await self.client.call("blockchain.scripthash.get_history", [scripthash])
         new_items = await self.db.remember_history(scripthash, history)
 
+        if new_items:
+            logger.info(
+                "Picked up %d new history item(s) on scripthash %s… (notify=%s)",
+                len(new_items), scripthash[:12], notify_new_items,
+            )
+
         if not notify_new_items:
             return len(new_items)
 
@@ -276,9 +358,22 @@ class Watcher:
 
     async def _record_and_notify_event(self, event: WalletEvent) -> bool:
         if not await self.db.save_event(event):
+            logger.debug("Duplicate event for tx %s… (%s); not re-notifying", event.txid[:12], event.status)
             return False
+        # Summary at INFO (txid is public on-chain anyway); amount and address are
+        # kept to DEBUG so financial detail isn't written to logs by default.
+        logger.info(
+            "Wallet event: %s %s tx %s… on %s",
+            event.wallet_name, event.event_type, event.txid[:12], event.status,
+        )
+        logger.debug(
+            "Event detail: %s sats, address %s…, path %s",
+            event.amount_sats, str(event.address)[:12], event.path,
+        )
         if self._should_notify_event(event):
-            await self._notify_activity(event)
+            await self.notifications.send(format_wallet_activity_notification(event))
+        else:
+            logger.debug("Event for tx %s… suppressed by notify_on_* config", event.txid[:12])
         return True
 
     @staticmethod
@@ -300,9 +395,14 @@ class Watcher:
 
         try:
             tx = await self.mempool.get_tx(txid)
-            return await self._build_enriched_event(watched, txid, electrum_height, tx)
+            event = await self._build_enriched_event(watched, txid, electrum_height, tx)
+            logger.debug("Built enriched event for tx %s… via Mempool", txid[:12])
+            return event
         except Exception as exc:
-            print(f"Mempool enrichment failed for {txid}; sending generic wallet activity notification: {exc}", flush=True)
+            logger.warning(
+                "Mempool enrichment failed for tx %s…; using generic wallet activity notification: %s",
+                txid[:12], exc,
+            )
             return self._fallback_event(watched, txid, electrum_height)
 
     async def _build_enriched_event(
@@ -398,21 +498,6 @@ class Watcher:
             return (1, 0)
         return (0, height)
 
-    @staticmethod
-    def _format_tx_io_list(items: list[dict[str, Any]], *, mark_owned_outputs: bool = False) -> str:
-        lines: list[str] = []
-        for item in items:
-            marker = "✅ " if mark_owned_outputs and item.get("owned") else ""
-            address = item.get("address") or "unknown address"
-            value_sats = int(item.get("value_sats") or 0)
-            path = item.get("path")
-
-            line = f"- {marker}`{address}` — `{value_sats:,} sats`"
-            if path:
-                line += f" ({path})"
-            lines.append(line)
-
-        return "\n".join(lines)
 
     async def notify_latest_transaction_for_wallet(
         self,
@@ -421,12 +506,12 @@ class Watcher:
         scan_limit: int | None = None,
         debug_logger: Any | None = None,
     ) -> WalletEvent:
-        """Send a real ntfy notification for the latest tx seen in one wallet.
+        """Send a real notification for the latest tx seen in one wallet.
 
         This deliberately uses the same derivation, Electrum/Fulcrum history,
-        optional Mempool enrichment, and ntfy formatting as the daemon path. It is
-        a one shot diagnostic path and does not save a wallet_event row, so it
-        cannot mask a later live notification.
+        optional Mempool enrichment, and notification formatting as the daemon
+        path. It is a one shot diagnostic path and does not save a wallet_event
+        row, so it cannot mask a later live notification.
         """
 
         async def ignore_notifications(message: dict[str, Any]) -> None:
@@ -476,7 +561,7 @@ class Watcher:
             debug(f"latest transaction selected: txid={txid} height={height}")
 
             event = await self._build_event(watched, txid, height)
-            await self._notify_activity(event, debug_latest=True)
+            await self.notifications.send(format_wallet_activity_notification(event, debug_latest=True))
             return event
         finally:
             if listener_task is not None:
@@ -659,9 +744,6 @@ class Watcher:
             "total_sats": confirmed + unconfirmed,
         }
 
-    @staticmethod
-    def _format_sats(value: int) -> str:
-        return f"{value:,} sats"
 
     async def _send_autobalance_notification(self) -> None:
         wallets = self._autobalance_wallets()
@@ -686,41 +768,9 @@ class Watcher:
                     pass
             await client.close()
 
-        total_confirmed = sum(int(row["confirmed_sats"]) for row in rows)
-        total_unconfirmed = sum(int(row["unconfirmed_sats"]) for row in rows)
-        total = total_confirmed + total_unconfirmed
-
         autobalance = self.config.get("autobalance") or {}
         selection = "all wallets combined" if bool(autobalance.get("all_wallets", True)) else "selected wallets"
-
-        lines = [
-            "**Autobalance summary**",
-            f"**Scope:** {selection}",
-        ]
-
-        for row in rows:
-            wallet_total = int(row["total_sats"])
-            wallet_confirmed = int(row["confirmed_sats"])
-            wallet_unconfirmed = int(row["unconfirmed_sats"])
-            lines.append(
-                f"- **{row['wallet_name']}:** `{self._format_sats(wallet_total)}` "
-                f"confirmed=`{self._format_sats(wallet_confirmed)}` "
-                f"unconfirmed=`{self._format_sats(wallet_unconfirmed)}`"
-            )
-
-        lines.extend(
-            [
-                f"**Total:** `{self._format_sats(total)}`",
-                f"**Confirmed:** `{self._format_sats(total_confirmed)}`",
-                f"**Unconfirmed:** `{self._format_sats(total_unconfirmed)}`",
-            ]
-        )
-
-        await self.notifier.send(
-            "Wallet Watchguard: Autobalance",
-            "\n\n".join(lines),
-            tags="bitcoin,watch",
-        )
+        await self.notifications.send(format_autobalance_notification(rows, selection=selection))
 
     async def _run_autobalance_loop(self) -> None:
         autobalance = self.config.get("autobalance") or {}
@@ -728,58 +778,27 @@ class Watcher:
         interval_seconds = interval_hours * 60 * 60
 
         while True:
+            # Gate on the persisted last sent time so frequent restarts don't
+            # re-fire the summary. Previously the loop sent immediately on every
+            # start, so anything that restarted the daemon (e.g. the listener
+            # supervisor) produced a burst of Autobalance messages.
+            last_sent = await self.db.get_autobalance_last_sent()
+            if last_sent is not None:
+                remaining = interval_seconds - (time.time() - last_sent)
+                if remaining > 0:
+                    logger.debug("Autobalance not due yet; sleeping %.0fs", remaining)
+                    await asyncio.sleep(remaining)
+                    continue
+
             try:
                 await self._send_autobalance_notification()
+                await self.db.set_autobalance_last_sent(time.time())
+                logger.info("Autobalance summary sent; next in %sh", interval_hours)
             except Exception as exc:
-                print(f"Autobalance notification failed: {exc}", flush=True)
+                logger.error("Autobalance notification failed: %s", exc, exc_info=exc)
+
             await asyncio.sleep(interval_seconds)
 
-    async def _notify_activity(self, event: WalletEvent, *, debug_latest: bool = False) -> None:
-        if debug_latest:
-            title = f"Wallet Watchguard debug: latest tx for {event.wallet_name}"
-        elif event.event_type == "received":
-            title = f"Bitcoin received: {event.wallet_name}"
-        elif event.event_type == "sent":
-            title = f"Bitcoin sent: {event.wallet_name}"
-        elif event.event_type == "self_transfer":
-            title = f"Bitcoin self-transfer: {event.wallet_name}"
-        else:
-            title = f"Bitcoin wallet activity: {event.wallet_name}"
-
-        status = "unconfirmed/mempool" if event.status == "unconfirmed" else f"confirmed at height {event.height}"
-        lines = []
-        if debug_latest:
-            lines.append("**Debug:** latest transaction notification test")
-        lines.extend(
-            [
-                f"**Wallet:** {event.wallet_name}",
-                f"**Type:** {event.event_type}",
-                f"**Status:** {status}",
-            ]
-        )
-
-        if event.amount_sats:
-            sign = "+" if event.amount_sats > 0 else ""
-            lines.append(f"**Amount:** `{sign}{event.amount_sats:,} sats`")
-        if event.fee_sats is not None:
-            lines.append(f"**Fee:** `{event.fee_sats:,} sats`")
-        if event.vsize is not None:
-            lines.append(f"**vsize:** `{event.vsize} vB`")
-        if event.fee_rate_sat_vb is not None:
-            lines.append(f"**Fee rate:** `{event.fee_rate_sat_vb:.2f} sat/vB`")
-
-        if not event.tx_inputs and not event.tx_outputs and event.address:
-            lines.append(f"**Address:** `{event.address}`")
-        if event.tx_inputs:
-            lines.append("**Inputs:**\n" + self._format_tx_io_list(event.tx_inputs))
-        if event.tx_outputs:
-            lines.append("**Outputs:**\n" + self._format_tx_io_list(event.tx_outputs, mark_owned_outputs=True))
-        if event.path:
-            lines.append(f"**Wallet path:** `{event.path}`")
-
-        lines.append(f"**Tx:** `{event.txid}`")
-        message = "\n\n".join(lines)
-        await self.notifier.send(title, message)
 
 
 def get_passphrase_from_env_or_prompt() -> str:
