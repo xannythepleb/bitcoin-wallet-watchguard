@@ -181,7 +181,10 @@ async fn main() -> Result<()> {
 fn generate_key() -> Result<()> {
     let keys = Keys::generate();
     let output = GenerateKeyOutput {
-        npub: keys.public_key().to_bech32().context("failed to encode npub")?,
+        npub: keys
+            .public_key()
+            .to_bech32()
+            .context("failed to encode npub")?,
         nsec: keys
             .secret_key()
             .to_bech32()
@@ -194,7 +197,10 @@ fn public_key() -> Result<()> {
     let nsec = read_stdin_string("nsec")?;
     let keys = Keys::parse(nsec.trim()).context("invalid sender nsec")?;
     let output = PublicKeyOutput {
-        npub: keys.public_key().to_bech32().context("failed to encode npub")?,
+        npub: keys
+            .public_key()
+            .to_bech32()
+            .context("failed to encode npub")?,
     };
     print_json(&output)
 }
@@ -204,7 +210,10 @@ async fn send_dm() -> Result<()> {
     validate_send_dm_request(&request)?;
 
     let keys = Keys::parse(request.sender_nsec.trim()).context("invalid sender nsec")?;
-    let sender_npub = keys.public_key().to_bech32().context("failed to encode sender npub")?;
+    let sender_npub = keys
+        .public_key()
+        .to_bech32()
+        .context("failed to encode sender npub")?;
     let client = Client::new(keys.clone());
     let timeout = Duration::from_secs(request.connect_timeout_seconds.max(1));
 
@@ -250,7 +259,10 @@ async fn send_dm() -> Result<()> {
     client.disconnect().await;
 
     let recipients_ok = deliveries.iter().all(|delivery| delivery.ok);
-    let self_copy_ok = self_copy.as_ref().map(|delivery| delivery.ok).unwrap_or(true);
+    let self_copy_ok = self_copy
+        .as_ref()
+        .map(|delivery| delivery.ok)
+        .unwrap_or(true);
     let output = SendDmOutput {
         ok: recipients_ok && self_copy_ok,
         sender_npub,
@@ -524,7 +536,8 @@ impl RecipientSpec {
                 if npub.is_empty() {
                     bail!("recipient npub cannot be blank");
                 }
-                PublicKey::parse(&npub).with_context(|| format!("invalid recipient npub: {npub}"))?;
+                PublicKey::parse(&npub)
+                    .with_context(|| format!("invalid recipient npub: {npub}"))?;
                 Ok(Self {
                     name: None,
                     npub,
@@ -536,9 +549,13 @@ impl RecipientSpec {
                 if npub.is_empty() {
                     bail!("recipient npub cannot be blank");
                 }
-                PublicKey::parse(&npub).with_context(|| format!("invalid recipient npub: {npub}"))?;
+                PublicKey::parse(&npub)
+                    .with_context(|| format!("invalid recipient npub: {npub}"))?;
                 Ok(Self {
-                    name: name.as_ref().map(|value| value.trim().to_string()).filter(|value| !value.is_empty()),
+                    name: name
+                        .as_ref()
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty()),
                     npub,
                     relays: trim_and_dedupe_relays(relays),
                 })
@@ -566,9 +583,7 @@ fn followed_recipients_from_inputs(
     Ok(followed)
 }
 
-fn contacts_from_followed_recipients(
-    recipients: &[FollowedRecipient],
-) -> Result<Vec<Contact>> {
+fn contacts_from_followed_recipients(recipients: &[FollowedRecipient]) -> Result<Vec<Contact>> {
     recipients
         .iter()
         .map(|recipient| {
