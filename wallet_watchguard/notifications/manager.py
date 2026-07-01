@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from typing import Protocol
 
 from .models import NotificationMessage, NotificationResult
+
+logger = logging.getLogger("wwg.notifications")
 
 
 class NotificationProvider(Protocol):
@@ -35,10 +38,19 @@ class NotificationManager:
     ) -> list[NotificationResult]:
         results: list[NotificationResult] = []
 
+        if not self.providers:
+            logger.warning("No notification providers configured; %r not delivered", message.title)
+            return results
+
+        provider_names = ", ".join(p.name for p in self.providers)
+        logger.info("Dispatching %r to %d provider(s): %s", message.title, len(self.providers), provider_names)
+
         for provider in self.providers:
             try:
                 results.append(await provider.send(message))
+                logger.debug("Provider %s delivered %r", provider.name, message.title)
             except Exception as exc:
+                logger.warning("Provider %s failed to deliver %r: %s", provider.name, message.title, exc)
                 results.append(
                     NotificationResult(
                         provider=provider.name,

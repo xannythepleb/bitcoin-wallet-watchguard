@@ -17,7 +17,7 @@ services:
       # Make sure error messages remain after the daemon crashes
       PYTHONUNBUFFERED: "1"
       # Error logging - default is info
-      WWG_LOG_LEVEL: INFO
+      WWG_LOG_LEVEL: "INFO"
     volumes:
       - wwg-data:/app/data
 

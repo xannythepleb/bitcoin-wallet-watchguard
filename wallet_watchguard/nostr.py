@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 from dataclasses import dataclass
@@ -7,6 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from .config import notification_provider_config
+
+logger = logging.getLogger("wwg.nostr")
 
 NOSTR_HELPER_BINARY = "wwg-nostr"
 DEFAULT_NOSTR_HELPER_PATH = f"./{NOSTR_HELPER_BINARY}"
@@ -87,5 +90,7 @@ def nostr_support_unavailable_message(availability: NostrHelperAvailability) -> 
 def ensure_nostr_helper_available(config: dict[str, Any]) -> NostrHelperAvailability:
     availability = nostr_helper_availability_from_config(config)
     if not availability.available:
+        logger.warning("Nostr helper unavailable: %s", availability.detail)
         raise NostrSupportUnavailable(nostr_support_unavailable_message(availability))
+    logger.debug("Nostr helper %s (%s)", availability.resolved_path, availability.source)
     return availability

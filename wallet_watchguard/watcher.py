@@ -106,6 +106,13 @@ class Watcher:
 
             await self._derive_store_and_subscribe()
             self._subscriptions_ready.set()
+            logger.info(
+                "Subscribed to %d scripthash(es) across %d wallet(s)",
+                self._subscription_count, len(self.config["wallets"]),
+            )
+
+            if self.mempool.enabled:
+                await self.mempool.check_connectivity()
 
             if bool((self.config.get("conversation") or {}).get("enabled", False)):
                 try:
@@ -288,6 +295,7 @@ class Watcher:
         if not scripthash:
             return
 
+        logger.debug("Live push for scripthash %s…", str(scripthash)[:12])
         await self._process_scripthash_update(scripthash, status, notify_new_items=True)
 
     async def _process_scripthash_update(
@@ -323,6 +331,12 @@ class Watcher:
         history = await self.client.call("blockchain.scripthash.get_history", [scripthash])
         new_items = await self.db.remember_history(scripthash, history)
 
+        if new_items:
+            logger.info(
+                "Picked up %d new history item(s) on scripthash %s… (notify=%s)",
+                len(new_items), scripthash[:12], notify_new_items,
+            )
+
         if not notify_new_items:
             return len(new_items)
 
@@ -344,9 +358,22 @@ class Watcher:
 
     async def _record_and_notify_event(self, event: WalletEvent) -> bool:
         if not await self.db.save_event(event):
+            logger.debug("Duplicate event for tx %s… (%s); not re-notifying", event.txid[:12], event.status)
             return False
+        # Summary at INFO (txid is public on-chain anyway); amount and address are
+        # kept to DEBUG so financial detail isn't written to logs by default.
+        logger.info(
+            "Wallet event: %s %s tx %s… on %s",
+            event.wallet_name, event.event_type, event.txid[:12], event.status,
+        )
+        logger.debug(
+            "Event detail: %s sats, address %s…, path %s",
+            event.amount_sats, str(event.address)[:12], event.path,
+        )
         if self._should_notify_event(event):
             await self.notifications.send(format_wallet_activity_notification(event))
+        else:
+            logger.debug("Event for tx %s… suppressed by notify_on_* config", event.txid[:12])
         return True
 
     @staticmethod
@@ -368,9 +395,14 @@ class Watcher:
 
         try:
             tx = await self.mempool.get_tx(txid)
-            return await self._build_enriched_event(watched, txid, electrum_height, tx)
+            event = await self._build_enriched_event(watched, txid, electrum_height, tx)
+            logger.debug("Built enriched event for tx %s… via Mempool", txid[:12])
+            return event
         except Exception as exc:
-            print(f"Mempool enrichment failed for {txid}; sending generic wallet activity notification: {exc}", flush=True)
+            logger.warning(
+                "Mempool enrichment failed for tx %s…; using generic wallet activity notification: %s",
+                txid[:12], exc,
+            )
             return self._fallback_event(watched, txid, electrum_height)
 
     async def _build_enriched_event(

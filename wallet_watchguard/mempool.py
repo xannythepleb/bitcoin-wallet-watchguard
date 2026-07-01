@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import httpx
+
+logger = logging.getLogger("wwg.mempool")
 
 
 class MempoolClient:
@@ -12,18 +15,41 @@ class MempoolClient:
         self.tls_verify = bool(config.get("tls_verify", True))
         self.timeout_seconds = int(config.get("timeout_seconds", 15))
 
+    async def check_connectivity(self) -> bool:
+        """Probe the Mempool instance once so startup can confirm reachability.
+
+        Best-effort: enrichment already falls back gracefully, so a failure here
+        is logged as a warning rather than raised.
+        """
+        if not self.enabled:
+            return False
+        try:
+            fees = await self.get_recommended_fees()
+            logger.info("Mempool reachable at %s", self.base_url or "(no base_url)")
+            logger.debug("Mempool fee sample: %s", mempool_priority_fees(fees))
+            return True
+        except Exception as exc:
+            logger.warning(
+                "Mempool enabled but unreachable at %s: %s (notifications will use generic fallback)",
+                self.base_url or "(no base_url)", exc,
+            )
+            return False
+
     async def get_tx(self, txid: str) -> dict[str, Any]:
         if not self.enabled:
             raise RuntimeError("Mempool integration is disabled")
         if not self.base_url:
             raise RuntimeError("Mempool base_url is not configured")
 
+        logger.debug("Enriching tx %s… via Mempool", txid[:12])
         async with httpx.AsyncClient(timeout=self.timeout_seconds, verify=self.tls_verify) as client:
             response = await client.get(f"{self.base_url}/tx/{txid}")
             response.raise_for_status()
             data = response.json()
             if not isinstance(data, dict):
                 raise RuntimeError("Unexpected Mempool transaction response")
+            confirmed = bool((data.get("status") or {}).get("confirmed", False))
+            logger.debug("Mempool returned tx %s… (confirmed=%s)", txid[:12], confirmed)
             return data
 
     async def get_recommended_fees(self) -> dict[str, Any]:
@@ -47,6 +73,7 @@ class MempoolClient:
             data = response.json()
             if not isinstance(data, dict):
                 raise RuntimeError("Unexpected Mempool fee recommendation response")
+            logger.debug("Mempool fee recommendations fetched")
             return data
 
 

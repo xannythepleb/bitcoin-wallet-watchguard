@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -8,6 +9,8 @@ from typing import Any
 import httpx
 
 from .crypto import decrypt_string_with_passphrase, metadata_from_config
+
+logger = logging.getLogger("wwg.ntfy")
 
 
 @dataclass(frozen=True)
@@ -112,6 +115,10 @@ class NtfyNotifier:
         if not firebase:
             headers["Firebase"] = b"no"
 
+        # Log the server and auth mode but never the topic or token: for an
+        # unprotected ntfy topic the topic name is itself a read/write capability.
+        effective_priority = priority or self.priority
+        logger.info("Sending ntfy notification via %s (auth=%s, priority=%s)", self.server, self.auth_type, effective_priority)
         async with httpx.AsyncClient(timeout=self._timeout(), verify=self.tls_verify) as client:
             response = await client.post(
                 self.topic_url,
@@ -120,6 +127,7 @@ class NtfyNotifier:
                 auth=self._auth_tuple(),
             )
             response.raise_for_status()
+            logger.debug("ntfy accepted notification (HTTP %s)", response.status_code)
 
     async def subscribe_json(self, *, since: str | int = "latest") -> AsyncIterator[dict[str, Any]]:
         headers = self._auth_headers()
