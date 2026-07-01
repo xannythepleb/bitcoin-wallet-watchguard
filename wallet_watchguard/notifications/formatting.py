@@ -127,9 +127,11 @@ def format_autobalance_notification(
     )
 
 
-def format_test_notification() -> NotificationMessage:
+def format_test_notification(provider: str = "ntfy") -> NotificationMessage:
+    provider_label = provider.strip() or "notification provider"
     message = (
-        "Bitcoin Wallet Watchguard successfully published this test notification via ntfy.\n\n"
+        "Bitcoin Wallet Watchguard successfully published this test notification "
+        f"via {provider_label}.\n\n"
         "This is free and open source software made by a fellow bitcoiner.\n"
         "If you appreciate it, my Lightning address is xanny@cake.cash ⚡"
     )

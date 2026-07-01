@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import getpass
 import secrets
 import sys
@@ -36,7 +37,9 @@ from .electrum import ElectrumClient, default_tls_verify_for_host
 from .mempool import MempoolClient, format_mempool_fee_summary
 from .notifications import (
     NotificationMessage,
+    NotificationResult,
     NostrNotificationProvider,
+    build_notification_manager,
     format_test_notification,
 )
 from .ntfy import NtfyNotifier, decrypt_ntfy_config
@@ -46,6 +49,7 @@ from .nostr import (
     generate_nostr_keypair,
     nostr_helper_availability_from_config,
     nostr_support_unavailable_message,
+    test_nostr_relays,
 )
 from .status import build_status_text, format_server_version, tor_upstream_lines
 from .tor import TorUpstreamManager, apply_tor_upstream, env_tor_upstream_enabled
@@ -66,6 +70,7 @@ INIT_SECTIONS = [
 ]
 SATS_PER_BTC = Decimal("100000000")
 BTC_QUANTUM = Decimal("0.00000001")
+NOTIFICATION_PROVIDER_CHOICES = ("all", "ntfy", "nostr")
 
 def _prompt(label: str, default: str | None = None, *, display_default: str | None = None) -> str:
     # display_default lets us show a friendly hint (e.g. "not yet set") while
@@ -373,7 +378,7 @@ async def _send_nostr_setup_test_dm_async(
     )
     result = await provider.send(
         NotificationMessage(
-            title="Wallet Watchguard Nostr test",
+            title="Bitcoin Wallet Watchguard - ⚡ xanny@cake.cash",
             markdown_body="Wallet Watchguard Nostr encrypted DM test message.",
             plain_body="Wallet Watchguard Nostr encrypted DM test message.",
         )
@@ -413,6 +418,82 @@ def _maybe_send_nostr_setup_test(
             f"warning: Nostr provider was configured, but the test DM failed: {exc}",
             file=sys.stderr,
         )
+
+
+def _notification_provider_label(provider: str) -> str:
+    labels = {
+        "all": "all enabled notification providers",
+        "ntfy": "ntfy",
+        "nostr": "Nostr encrypted DM",
+    }
+    return labels.get(provider, provider)
+
+
+def _config_for_notification_provider_selection(config: dict, provider: str) -> dict:
+    if provider == "all":
+        return config
+
+    if provider not in {"ntfy", "nostr"}:
+        raise ValueError(f"Unsupported notification provider: {provider}")
+
+    selected_config = copy.deepcopy(config)
+    for provider_name in ("ntfy", "nostr"):
+        provider_config = _editable_notification_provider_config(
+            selected_config,
+            provider_name,
+        )
+        provider_config["enabled"] = provider_name == provider
+
+    return selected_config
+
+
+def _print_notification_results(results: list[NotificationResult]) -> None:
+    if not results:
+        print("No notification providers were selected or enabled.")
+        return
+
+    for result in results:
+        state = "sent" if result.ok else "failed"
+        detail = f": {result.detail}" if result.detail else ""
+        print(f"{result.provider}: {state}{detail}")
+
+
+async def _cmd_test_notifications_async(
+    config: dict,
+    passphrase: str,
+    *,
+    provider: str,
+) -> list[NotificationResult]:
+    selected_config = _config_for_notification_provider_selection(config, provider)
+    manager, _decrypted_ntfy_config = build_notification_manager(
+        selected_config,
+        passphrase,
+    )
+    message = format_test_notification(_notification_provider_label(provider))
+    return await manager.send(message, raise_on_failure=False)
+
+
+def _relay_failure_text(failure: object) -> str:
+    if isinstance(failure, dict):
+        url = str(failure.get("url") or "relay")
+        error = str(failure.get("error") or "failed")
+        return f"{url}: {error}"
+    return str(failure)
+
+
+def _print_nostr_relay_test_result(result: dict[str, object]) -> None:
+    accepted_relays = result.get("accepted_relays") or []
+    failed_relays = result.get("failed_relays") or []
+
+    if isinstance(accepted_relays, list):
+        print(f"Accepted relays: {len(accepted_relays)}")
+        for relay in accepted_relays:
+            print(f"  ✓ {relay}")
+
+    if isinstance(failed_relays, list):
+        print(f"Failed relays: {len(failed_relays)}")
+        for failure in failed_relays:
+            print(f"  ✗ {_relay_failure_text(failure)}")
 
 
 def _configure_nostr_provider(
@@ -1957,7 +2038,13 @@ async def _cmd_live_debug_async(config: dict, passphrase: str, args: argparse.Na
     print(f"Path: {result['path']}")
     print(f"Address: {result['address']}")
     print(f"Processed new/changed history items: {result['processed_items']}")
-    print("If ntfy credentials were valid and notification settings allowed this transaction status, a normal live notification was sent.")
+    provider = getattr(args, "provider", "all")
+    provider_label = _notification_provider_label(provider)
+    print(
+        "If "
+        f"{provider_label} was configured and notification settings allowed this "
+        "transaction status, a normal live notification was sent."
+    )
 
 
 async def _cmd_addresses_async(config: dict, passphrase: str, args: argparse.Namespace) -> None:
@@ -2369,6 +2456,21 @@ def cmd_test_ntfy(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_test_notifications(args: argparse.Namespace) -> int:
+    provider = str(getattr(args, "provider", "all"))
+    config = load_config(args.config)
+    passphrase = args.passphrase or get_passphrase_from_env_or_prompt()
+    results = asyncio.run(
+        _cmd_test_notifications_async(
+            config,
+            passphrase,
+            provider=provider,
+        )
+    )
+    _print_notification_results(results)
+    return 0 if results and all(result.ok for result in results) else 1
+
+
 def cmd_addresses(args: argparse.Namespace) -> int:
     config = _runtime_config(load_config(args.config), args)
     passphrase = args.passphrase or get_passphrase_from_env_or_prompt()
@@ -2569,6 +2671,10 @@ def cmd_autobalance(args: argparse.Namespace) -> int:
 
 def cmd_live_debug(args: argparse.Namespace) -> int:
     config = _runtime_config(load_config(args.config), args)
+    config = _config_for_notification_provider_selection(
+        config,
+        getattr(args, "provider", "all"),
+    )
     passphrase = args.passphrase or get_passphrase_from_env_or_prompt()
     asyncio.run(_cmd_live_debug_async(config, passphrase, args))
     return 0
@@ -2686,6 +2792,45 @@ def cmd_nostr_generate_key(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_nostr_test_dm(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    passphrase = args.passphrase or get_passphrase_from_env_or_prompt()
+    results = asyncio.run(
+        _cmd_test_notifications_async(
+            config,
+            passphrase,
+            provider="nostr",
+        )
+    )
+    _print_notification_results(results)
+    return 0 if results and all(result.ok for result in results) else 1
+
+
+def cmd_nostr_test_relays(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    nostr_config = notification_provider_config(config, "nostr")
+    availability = ensure_nostr_helper_available(config)
+    helper_path = availability.resolved_path or availability.configured_path
+
+    relays = list(nostr_config.get("relays") or [])
+    if not relays:
+        raise ValueError("No Nostr relays are configured")
+
+    timeout_seconds = int(getattr(args, "timeout", None) or nostr_config.get("timeout_seconds", 30))
+    connect_timeout_seconds = int(
+        getattr(args, "connect_timeout", None)
+        or nostr_config.get("connect_timeout_seconds", 10)
+    )
+    result = test_nostr_relays(
+        helper_path,
+        relays,
+        connect_timeout_seconds=connect_timeout_seconds,
+        timeout_seconds=timeout_seconds,
+    )
+    _print_nostr_relay_test_result(result)
+    return 0 if bool(result.get("ok", False)) else 1
+
+
 def cmd_nostr_status(args: argparse.Namespace) -> int:
     config_path = Path(args.config)
 
@@ -2793,6 +2938,24 @@ def build_parser() -> argparse.ArgumentParser:
     _add_tor_upstream_arg(p_test)
     p_test.set_defaults(func=cmd_test_ntfy)
 
+    p_test_notifications = sub.add_parser(
+        "test-notifications",
+        help="Send a test notification through the configured provider pipeline",
+    )
+    p_test_notifications.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_test_notifications.add_argument(
+        "--passphrase",
+        default=None,
+        help="Encryption passphrase; otherwise prompt/env",
+    )
+    p_test_notifications.add_argument(
+        "--provider",
+        choices=NOTIFICATION_PROVIDER_CHOICES,
+        default="all",
+        help="Notification provider to test",
+    )
+    p_test_notifications.set_defaults(func=cmd_test_notifications)
+
 
     p_live_debug = sub.add_parser(
         "live-debug",
@@ -2803,6 +2966,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_live_debug.add_argument("--wallet", default=None, help="Choose wallet by exact name or unique partial name")
     p_live_debug.add_argument("--wallet-index", type=int, default=None, help="Choose wallet by its 1-based index in config")
     p_live_debug.add_argument("--limit", type=int, default=None, help="Addresses per branch to scan; defaults to wallet/app lookahead")
+    p_live_debug.add_argument(
+        "--provider",
+        choices=NOTIFICATION_PROVIDER_CHOICES,
+        default="all",
+        help="Notification provider to use for the replay",
+    )
     _add_tor_upstream_arg(p_live_debug)
     p_live_debug.set_defaults(func=cmd_live_debug)
 
@@ -3030,6 +3199,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do not offer to send a Nostr test DM during setup",
     )
     p_nostr_generate.set_defaults(func=cmd_nostr_generate_key)
+
+    p_nostr_test_dm = nostr_sub.add_parser(
+        "test-dm",
+        help="Send a Nostr encrypted DM test notification",
+    )
+    p_nostr_test_dm.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_nostr_test_dm.add_argument(
+        "--passphrase",
+        default=None,
+        help="Encryption passphrase; otherwise prompt/env",
+    )
+    p_nostr_test_dm.set_defaults(func=cmd_nostr_test_dm)
+
+    p_nostr_test_relays = nostr_sub.add_parser(
+        "test-relays",
+        help="Check configured Nostr relay connectivity",
+    )
+    p_nostr_test_relays.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    p_nostr_test_relays.add_argument(
+        "--connect-timeout",
+        type=int,
+        default=None,
+        help="Relay connection timeout in seconds; defaults to Nostr config",
+    )
+    p_nostr_test_relays.add_argument(
+        "--timeout",
+        type=int,
+        default=None,
+        help="Overall helper timeout in seconds; defaults to Nostr config",
+    )
+    p_nostr_test_relays.set_defaults(func=cmd_nostr_test_relays)
 
     p_nostr_status = nostr_sub.add_parser(
         "status",

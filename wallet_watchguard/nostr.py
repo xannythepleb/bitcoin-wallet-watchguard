@@ -142,6 +142,26 @@ def generate_nostr_keypair(helper_path: str, *, timeout_seconds: int = 30) -> No
     return NostrKeypair(npub=npub, nsec=nsec)
 
 
+def test_nostr_relays(
+    helper_path: str,
+    relays: list[str],
+    *,
+    connect_timeout_seconds: int = 10,
+    timeout_seconds: int = 30,
+) -> dict[str, Any]:
+    """Check configured Nostr relay connectivity using the Rust helper."""
+    request = {
+        "relays": relays,
+        "connect_timeout_seconds": max(1, int(connect_timeout_seconds)),
+    }
+    return _run_nostr_helper_json(
+        helper_path,
+        "test-relays",
+        stdin_text=json.dumps(request, ensure_ascii=False),
+        timeout_seconds=timeout_seconds,
+    )
+
+
 def _run_nostr_helper_json(
     helper_path: str,
     command: str,
