@@ -96,7 +96,7 @@ class Watcher:
 
         await self.db.connect()
         try:
-            logger.info("Wallet Watchguard starting")
+            logger.info("Bitcoin Wallet Watchguard starting...")
             await self.tor_upstream.start()
             await self.client.connect()
             listener = asyncio.create_task(self.client.listen(self._handle_notification))
