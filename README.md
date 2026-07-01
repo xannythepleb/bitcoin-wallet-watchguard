@@ -312,7 +312,7 @@ image: ghcr.io/xannythepleb/bitcoin-wallet-watchguard:latest
 Instead of:
 
 ```yml
-image: ghcr.io/xannythepleb/bitcoin-wallet-watchguard:latest
+image: ghcr.io/xannythepleb/bitcoin-wallet-watchguard:slim
 ```
 
 Again, this is the default, so you only have the slim image if you actively chose it. If you pulled from the `docker-compose.yml` without editing it, you already have the full image.
