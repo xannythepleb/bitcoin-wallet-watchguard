@@ -691,6 +691,7 @@ And for the Rust helper:
 * **hex**: Used once to encode each derived address’s `script_pubkey` bytes into a hex string for JSON output.
 * **serde**: Used only to derive `Serialize` for `DerivedRow`, the struct representing each derived address row.
 * **serde_json**: Serialises the list of derived rows into pretty printed JSON, which the Python side of WWG can consume.
+* **nostr-sdk**: For Nostr notifications via end-to-end encrypted gift wrapped DMs.
 
 Additionally, the Tor Debian package is installed on the Docker image in order to provide the built in Tor functionality that allows connection to upstream Bitcoin nodes that are accessible via an onion service without external proxy configuration.
 
